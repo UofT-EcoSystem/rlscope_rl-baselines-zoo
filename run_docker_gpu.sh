@@ -7,6 +7,10 @@ echo "Executing in the docker (gpu image):"
 echo $cmd_line
 
 
+#docker run -it --runtime=nvidia --rm --network host --ipc=host \
+#  --mount src=$(pwd),target=/root/code/stable-baselines,type=bind araffin/rl-baselines-zoo\
+#  bash -c "cd /root/code/stable-baselines/ && $cmd_line"
+
 docker run -it --runtime=nvidia --rm --network host --ipc=host \
-  --mount src=$(pwd),target=/root/code/stable-baselines,type=bind araffin/rl-baselines-zoo\
+  --mount src=$(pwd),target=/root/code/stable-baselines,type=bind rl-baselines-zoo \
   bash -c "cd /root/code/stable-baselines/ && $cmd_line"

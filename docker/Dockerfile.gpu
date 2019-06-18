@@ -28,6 +28,11 @@ RUN \
     pip install optuna && \
     pip install pytablewriter==0.36.0
 
+RUN \
+    . $VENV/bin/activate && \
+    pip install ipdb && \
+    pip install ipython
+
 ENV PATH=$VENV/bin:$PATH
 
 COPY docker/entrypoint.sh /tmp/
