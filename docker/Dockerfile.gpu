@@ -1,4 +1,4 @@
-FROM nvidia/cuda:9.0-cudnn7-runtime-ubuntu16.04
+FROM nvidia/cuda:10.0-cudnn7-runtime-ubuntu16.04
 
 RUN apt-get -y update && \
     apt-get -y install git wget python-dev python3-dev libopenmpi-dev \
@@ -21,12 +21,19 @@ RUN \
     pip install pytest-cov && \
     pip install pyyaml && \
     pip install box2d-py==2.3.5 && \
-    pip install tensorflow-gpu==1.8.0 && \
     pip install stable-baselines && \
     pip install pybullet && \
     pip install gym-minigrid && \
     pip install optuna && \
     pip install pytablewriter==0.36.0
+
+RUN \
+    . $VENV/bin/activate && \
+    pip install tensorflow-gpu==1.13.1
+
+RUN \
+    . $VENV/bin/activate && \
+    pip install progressbar2
 
 RUN \
     . $VENV/bin/activate && \
