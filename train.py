@@ -30,6 +30,44 @@ from stable_baselines.ppo2.ppo2 import constfn
 from utils import make_env, ALGOS, linear_schedule, get_latest_run_id, get_wrapper_class
 from utils.hyperparams_opt import hyperparam_optimization
 
+import iml_profiler.api as iml
+
+def get_paths(args, env_id):
+    # Save trained model
+    log_path = "{}/{}/".format(args.log_folder, args.algo)
+    save_path = os.path.join(log_path, "{}_{}".format(env_id, get_latest_run_id(log_path, env_id) + 1))
+    iml_directory = os.path.join(save_path, 'iml_traces')
+    params_path = "{}/{}".format(save_path, env_id)
+    os.makedirs(params_path, exist_ok=True)
+    paths = {
+        'log_path':log_path,
+        'save_path':save_path,
+        'params_path':params_path,
+        'iml_directory':iml_directory,
+    }
+    return paths
+
+def get_mpi_rank():
+    rank = 0
+    using_mpi = False
+    if MPI.COMM_WORLD.Get_size() > 1:
+        using_mpi = True
+        rank = MPI.COMM_WORLD.Get_rank()
+    return rank, using_mpi
+
+def get_process_name(args):
+    rank, using_mpi = get_mpi_rank()
+    if using_mpi:
+        process_name = "{algo}_{env}_{proc}".format(
+            algo=args.algo,
+            env=env_ids[0],
+            proc=rank)
+    else:
+        process_name = "{algo}_{env}".format(
+            algo=args.algo,
+            env=env_ids[0])
+    return process_name
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, nargs='+', default=["CartPole-v1"], help='environment ID(s)')
@@ -55,6 +93,7 @@ if __name__ == '__main__':
     parser.add_argument('--verbose', help='Verbose mode (0: no output, 1: INFO)', default=1,
                         type=int)
     parser.add_argument('--gym-packages', type=str, nargs='+', default=[], help='Additional external Gym environemnt package modules to import (e.g. gym_minigrid)')
+    iml.add_iml_arguments(parser)
     args = parser.parse_args()
 
     # Going through custom gym packages to let them register in the global registory
@@ -62,246 +101,278 @@ if __name__ == '__main__':
         importlib.import_module(env_module)
 
     env_ids = args.env
-    registered_envs = set(gym.envs.registry.env_specs.keys())
 
-    for env_id in env_ids:
-        # If the environment is not found, suggest the closest match
-        if env_id not in registered_envs:
-            try:
-                closest_match = difflib.get_close_matches(env_id, registered_envs, n=1)[0]
-            except IndexError:
-                closest_match = "'no close match found...'"
-            raise ValueError('{} not found in gym registry, you maybe meant {}?'.format(env_id, closest_match))
+    if len(env_ids) != 1:
+        print("IML: ERROR; only one --env allowed at a time.")
+    # Default output paths from training are:
+    #
+    # trained_agents (--log-folder)
+    # └── ppo2 (--algo)
+    #     └── CartPole-v1_1 (--env + new largest unique exp_id)
+    #         ├── CartPole-v1 (--env)
+    #         │   └── config.yml
+    #         └── CartPole-v1.pkl
+    #
+    # We store iml trace files within the output directory hierarchy:
+    #
+    # trained_agents
+    # └── ppo2
+    #     └── CartPole-v1_1
+    #         ├── CartPole-v1
+    #         │   └── config.yml
+    #         ├── iml_traces
+    #         │   └── ... (iml trace files)
+    #         └── CartPole-v1.pkl
+    paths = get_paths(args, env_ids[0])
+    iml_directory = paths['iml_directory']
+    iml.handle_iml_args(parser, args, directory=iml_directory)
 
-    set_global_seeds(args.seed)
+    process_name = get_process_name(args)
+    phase_name = process_name
 
-    if args.trained_agent != "":
-        assert args.trained_agent.endswith('.pkl') and os.path.isfile(args.trained_agent), \
-            "The trained_agent must be a valid path to a .pkl file"
+    with iml.prof.profile(process_name=process_name, phase_name=phase_name):
+        with iml.prof.operation('setup_training'):
+            registered_envs = set(gym.envs.registry.env_specs.keys())
 
-    rank = 0
-    if MPI.COMM_WORLD.Get_size() > 1:
-        print("Using MPI for multiprocessing with {} workers".format(MPI.COMM_WORLD.Get_size()))
-        rank = MPI.COMM_WORLD.Get_rank()
-        print("Worker rank: {}".format(rank))
+            for env_id in env_ids:
+                # If the environment is not found, suggest the closest match
+                if env_id not in registered_envs:
+                    try:
+                        closest_match = difflib.get_close_matches(env_id, registered_envs, n=1)[0]
+                    except IndexError:
+                        closest_match = "'no close match found...'"
+                    raise ValueError('{} not found in gym registry, you maybe meant {}?'.format(env_id, closest_match))
 
-        args.seed += rank
-        if rank != 0:
-            args.verbose = 0
-            args.tensorboard_log = ''
+            set_global_seeds(args.seed)
 
-    for env_id in env_ids:
-        tensorboard_log = None if args.tensorboard_log == '' else os.path.join(args.tensorboard_log, env_id)
+            if args.trained_agent != "":
+                assert args.trained_agent.endswith('.pkl') and os.path.isfile(args.trained_agent), \
+                    "The trained_agent must be a valid path to a .pkl file"
 
-        is_atari = False
-        if 'NoFrameskip' in env_id:
-            is_atari = True
+            rank, using_mpi = get_mpi_rank()
+            if using_mpi:
+                print("Using MPI for multiprocessing with {} workers".format(MPI.COMM_WORLD.Get_size()))
+                print("Worker rank: {}".format(rank))
 
-        print("=" * 10, env_id, "=" * 10)
+                args.seed += rank
+                if rank != 0:
+                    args.verbose = 0
+                    args.tensorboard_log = ''
 
-        # Load hyperparameters from yaml file
-        with open('hyperparams/{}.yml'.format(args.algo), 'r') as f:
-            hyperparams_dict = yaml.load(f)
-            if env_id in list(hyperparams_dict.keys()):
-                hyperparams = hyperparams_dict[env_id]
-            elif is_atari:
-                hyperparams = hyperparams_dict['atari']
-            else:
-                raise ValueError("Hyperparameters not found for {}-{}".format(args.algo, env_id))
+            for env_id in env_ids:
+                tensorboard_log = None if args.tensorboard_log == '' else os.path.join(args.tensorboard_log, env_id)
 
-        # Sort hyperparams that will be saved
-        saved_hyperparams = OrderedDict([(key, hyperparams[key]) for key in sorted(hyperparams.keys())])
+                is_atari = False
+                if 'NoFrameskip' in env_id:
+                    is_atari = True
 
-        algo_ = args.algo
-        # HER is only a wrapper around an algo
-        if args.algo == 'her':
-            algo_ = saved_hyperparams['model_class']
-            assert algo_ in {'sac', 'ddpg', 'dqn'}, "{} is not compatible with HER".format(algo_)
-            # Retrieve the model class
-            hyperparams['model_class'] = ALGOS[saved_hyperparams['model_class']]
+                print("=" * 10, env_id, "=" * 10)
 
-        if args.verbose > 0:
-            pprint(saved_hyperparams)
+                # Load hyperparameters from yaml file
+                with open('hyperparams/{}.yml'.format(args.algo), 'r') as f:
+                    hyperparams_dict = yaml.load(f)
+                    if env_id in list(hyperparams_dict.keys()):
+                        hyperparams = hyperparams_dict[env_id]
+                    elif is_atari:
+                        hyperparams = hyperparams_dict['atari']
+                    else:
+                        raise ValueError("Hyperparameters not found for {}-{}".format(args.algo, env_id))
 
-        n_envs = hyperparams.get('n_envs', 1)
+                # Sort hyperparams that will be saved
+                saved_hyperparams = OrderedDict([(key, hyperparams[key]) for key in sorted(hyperparams.keys())])
 
-        if args.verbose > 0:
-            print("Using {} environments".format(n_envs))
+                algo_ = args.algo
+                # HER is only a wrapper around an algo
+                if args.algo == 'her':
+                    algo_ = saved_hyperparams['model_class']
+                    assert algo_ in {'sac', 'ddpg', 'dqn'}, "{} is not compatible with HER".format(algo_)
+                    # Retrieve the model class
+                    hyperparams['model_class'] = ALGOS[saved_hyperparams['model_class']]
 
-        # Create learning rate schedules for ppo2 and sac
-        if algo_ in ["ppo2", "sac"]:
-            for key in ['learning_rate', 'cliprange']:
-                if key not in hyperparams:
-                    continue
-                if isinstance(hyperparams[key], str):
-                    schedule, initial_value = hyperparams[key].split('_')
-                    initial_value = float(initial_value)
-                    hyperparams[key] = linear_schedule(initial_value)
-                elif isinstance(hyperparams[key], float):
-                    hyperparams[key] = constfn(hyperparams[key])
-                else:
-                    raise ValueError('Invalid valid for {}: {}'.format(key, hyperparams[key]))
-
-        # Should we overwrite the number of timesteps?
-        if args.n_timesteps > 0:
-            if args.verbose:
-                print("Overwriting n_timesteps with n={}".format(args.n_timesteps))
-            n_timesteps = args.n_timesteps
-        else:
-            n_timesteps = int(hyperparams['n_timesteps'])
-
-        normalize = False
-        normalize_kwargs = {}
-        if 'normalize' in hyperparams.keys():
-            normalize = hyperparams['normalize']
-            if isinstance(normalize, str):
-                normalize_kwargs = eval(normalize)
-                normalize = True
-            del hyperparams['normalize']
-
-        if 'policy_kwargs' in hyperparams.keys():
-            hyperparams['policy_kwargs'] = eval(hyperparams['policy_kwargs'])
-
-        # Delete keys so the dict can be pass to the model constructor
-        if 'n_envs' in hyperparams.keys():
-            del hyperparams['n_envs']
-        del hyperparams['n_timesteps']
-
-        # obtain a class object from a wrapper name string in hyperparams
-        # and delete the entry
-        env_wrapper = get_wrapper_class(hyperparams)
-        if 'env_wrapper' in hyperparams.keys():
-            del hyperparams['env_wrapper']
-
-        def create_env(n_envs):
-            """
-            Create the environment and wrap it if necessary
-            :param n_envs: (int)
-            :return: (gym.Env)
-            """
-            global hyperparams
-
-            if is_atari:
                 if args.verbose > 0:
-                    print("Using Atari wrapper")
-                env = make_atari_env(env_id, num_env=n_envs, seed=args.seed)
-                # Frame-stacking with 4 frames
-                env = VecFrameStack(env, n_stack=4)
-            elif algo_ in ['dqn', 'ddpg']:
-                if hyperparams.get('normalize', False):
-                    print("WARNING: normalization not supported yet for DDPG/DQN")
-                env = gym.make(env_id)
-                env.seed(args.seed)
-                if env_wrapper is not None:
-                    env = env_wrapper(env)
-            else:
-                if n_envs == 1:
-                    env = DummyVecEnv([make_env(env_id, 0, args.seed, wrapper_class=env_wrapper)])
-                else:
-                    # env = SubprocVecEnv([make_env(env_id, i, args.seed) for i in range(n_envs)])
-                    # On most env, SubprocVecEnv does not help and is quite memory hungry
-                    env = DummyVecEnv([make_env(env_id, i, args.seed, wrapper_class=env_wrapper) for i in range(n_envs)])
-                if normalize:
-                    if args.verbose > 0:
-                        if len(normalize_kwargs) > 0:
-                            print("Normalization activated: {}".format(normalize_kwargs))
+                    pprint(saved_hyperparams)
+
+                n_envs = hyperparams.get('n_envs', 1)
+
+                if args.verbose > 0:
+                    print("Using {} environments".format(n_envs))
+
+                # Create learning rate schedules for ppo2 and sac
+                if algo_ in ["ppo2", "sac"]:
+                    for key in ['learning_rate', 'cliprange']:
+                        if key not in hyperparams:
+                            continue
+                        if isinstance(hyperparams[key], str):
+                            schedule, initial_value = hyperparams[key].split('_')
+                            initial_value = float(initial_value)
+                            hyperparams[key] = linear_schedule(initial_value)
+                        elif isinstance(hyperparams[key], float):
+                            hyperparams[key] = constfn(hyperparams[key])
                         else:
-                            print("Normalizing input and reward")
-                    env = VecNormalize(env, **normalize_kwargs)
-            # Optional Frame-stacking
-            if hyperparams.get('frame_stack', False):
-                n_stack = hyperparams['frame_stack']
-                env = VecFrameStack(env, n_stack)
-                print("Stacking {} frames".format(n_stack))
-                del hyperparams['frame_stack']
-            return env
+                            raise ValueError('Invalid valid for {}: {}'.format(key, hyperparams[key]))
+
+                # Should we overwrite the number of timesteps?
+                if args.n_timesteps > 0:
+                    if args.verbose:
+                        print("Overwriting n_timesteps with n={}".format(args.n_timesteps))
+                    n_timesteps = args.n_timesteps
+                else:
+                    n_timesteps = int(hyperparams['n_timesteps'])
+
+                normalize = False
+                normalize_kwargs = {}
+                if 'normalize' in hyperparams.keys():
+                    normalize = hyperparams['normalize']
+                    if isinstance(normalize, str):
+                        normalize_kwargs = eval(normalize)
+                        normalize = True
+                    del hyperparams['normalize']
+
+                if 'policy_kwargs' in hyperparams.keys():
+                    hyperparams['policy_kwargs'] = eval(hyperparams['policy_kwargs'])
+
+                # Delete keys so the dict can be pass to the model constructor
+                if 'n_envs' in hyperparams.keys():
+                    del hyperparams['n_envs']
+                del hyperparams['n_timesteps']
+
+                # obtain a class object from a wrapper name string in hyperparams
+                # and delete the entry
+                env_wrapper = get_wrapper_class(hyperparams)
+                if 'env_wrapper' in hyperparams.keys():
+                    del hyperparams['env_wrapper']
+
+                def create_env(n_envs):
+                    """
+                    Create the environment and wrap it if necessary
+                    :param n_envs: (int)
+                    :return: (gym.Env)
+                    """
+                    global hyperparams
+
+                    if is_atari:
+                        if args.verbose > 0:
+                            print("Using Atari wrapper")
+                        env = make_atari_env(env_id, num_env=n_envs, seed=args.seed)
+                        # Frame-stacking with 4 frames
+                        env = VecFrameStack(env, n_stack=4)
+                    elif algo_ in ['dqn', 'ddpg']:
+                        if hyperparams.get('normalize', False):
+                            print("WARNING: normalization not supported yet for DDPG/DQN")
+                        env = gym.make(env_id)
+                        env.seed(args.seed)
+                        if env_wrapper is not None:
+                            env = env_wrapper(env)
+                    else:
+                        if n_envs == 1:
+                            env = DummyVecEnv([make_env(env_id, 0, args.seed, wrapper_class=env_wrapper)])
+                        else:
+                            # env = SubprocVecEnv([make_env(env_id, i, args.seed) for i in range(n_envs)])
+                            # On most env, SubprocVecEnv does not help and is quite memory hungry
+                            env = DummyVecEnv([make_env(env_id, i, args.seed, wrapper_class=env_wrapper) for i in range(n_envs)])
+                        if normalize:
+                            if args.verbose > 0:
+                                if len(normalize_kwargs) > 0:
+                                    print("Normalization activated: {}".format(normalize_kwargs))
+                                else:
+                                    print("Normalizing input and reward")
+                            env = VecNormalize(env, **normalize_kwargs)
+                    # Optional Frame-stacking
+                    if hyperparams.get('frame_stack', False):
+                        n_stack = hyperparams['frame_stack']
+                        env = VecFrameStack(env, n_stack)
+                        print("Stacking {} frames".format(n_stack))
+                        del hyperparams['frame_stack']
+                    return env
 
 
-        env = create_env(n_envs)
-        # Stop env processes to free memory
-        if args.optimize_hyperparameters and n_envs > 1:
-            env.close()
+                env = create_env(n_envs)
+                # Stop env processes to free memory
+                if args.optimize_hyperparameters and n_envs > 1:
+                    env.close()
 
-        # Parse noise string for DDPG and SAC
-        if algo_ in ['ddpg', 'sac'] and hyperparams.get('noise_type') is not None:
-            noise_type = hyperparams['noise_type'].strip()
-            noise_std = hyperparams['noise_std']
-            n_actions = env.action_space.shape[0]
-            if 'adaptive-param' in noise_type:
-                assert algo_ == 'ddpg', 'Parameter is not supported by SAC'
-                hyperparams['param_noise'] = AdaptiveParamNoiseSpec(initial_stddev=noise_std,
-                                                                    desired_action_stddev=noise_std)
-            elif 'normal' in noise_type:
-                hyperparams['action_noise'] = NormalActionNoise(mean=np.zeros(n_actions),
-                                                                sigma=noise_std * np.ones(n_actions))
-            elif 'ornstein-uhlenbeck' in noise_type:
-                hyperparams['action_noise'] = OrnsteinUhlenbeckActionNoise(mean=np.zeros(n_actions),
-                                                                           sigma=noise_std * np.ones(n_actions))
-            else:
-                raise RuntimeError('Unknown noise type "{}"'.format(noise_type))
-            print("Applying {} noise with std {}".format(noise_type, noise_std))
-            del hyperparams['noise_type']
-            del hyperparams['noise_std']
+                # Parse noise string for DDPG and SAC
+                if algo_ in ['ddpg', 'sac'] and hyperparams.get('noise_type') is not None:
+                    noise_type = hyperparams['noise_type'].strip()
+                    noise_std = hyperparams['noise_std']
+                    n_actions = env.action_space.shape[0]
+                    if 'adaptive-param' in noise_type:
+                        assert algo_ == 'ddpg', 'Parameter is not supported by SAC'
+                        hyperparams['param_noise'] = AdaptiveParamNoiseSpec(initial_stddev=noise_std,
+                                                                            desired_action_stddev=noise_std)
+                    elif 'normal' in noise_type:
+                        hyperparams['action_noise'] = NormalActionNoise(mean=np.zeros(n_actions),
+                                                                        sigma=noise_std * np.ones(n_actions))
+                    elif 'ornstein-uhlenbeck' in noise_type:
+                        hyperparams['action_noise'] = OrnsteinUhlenbeckActionNoise(mean=np.zeros(n_actions),
+                                                                                   sigma=noise_std * np.ones(n_actions))
+                    else:
+                        raise RuntimeError('Unknown noise type "{}"'.format(noise_type))
+                    print("Applying {} noise with std {}".format(noise_type, noise_std))
+                    del hyperparams['noise_type']
+                    del hyperparams['noise_std']
 
-        if args.trained_agent.endswith('.pkl') and os.path.isfile(args.trained_agent):
-            # Continue training
-            print("Loading pretrained agent")
-            # Policy should not be changed
-            del hyperparams['policy']
+                if args.trained_agent.endswith('.pkl') and os.path.isfile(args.trained_agent):
+                    # Continue training
+                    print("Loading pretrained agent")
+                    # Policy should not be changed
+                    del hyperparams['policy']
 
-            model = ALGOS[args.algo].load(args.trained_agent, env=env,
-                                          tensorboard_log=tensorboard_log, verbose=args.verbose, **hyperparams)
+                    model = ALGOS[args.algo].load(args.trained_agent, env=env,
+                                                  tensorboard_log=tensorboard_log, verbose=args.verbose, **hyperparams)
 
-            exp_folder = args.trained_agent.split('.pkl')[0]
-            if normalize:
-                print("Loading saved running average")
-                env.load_running_average(exp_folder)
+                    exp_folder = args.trained_agent.split('.pkl')[0]
+                    if normalize:
+                        print("Loading saved running average")
+                        env.load_running_average(exp_folder)
 
-        elif args.optimize_hyperparameters:
+                elif args.optimize_hyperparameters:
 
-            if args.verbose > 0:
-                print("Optimizing hyperparameters")
-
-
-            def create_model(*_args, **kwargs):
-                """
-                Helper to create a model with different hyperparameters
-                """
-                return ALGOS[args.algo](env=create_env(n_envs), tensorboard_log=tensorboard_log,
-                                        verbose=0, **kwargs)
+                    if args.verbose > 0:
+                        print("Optimizing hyperparameters")
 
 
-            data_frame = hyperparam_optimization(args.algo, create_model, create_env, n_trials=args.n_trials,
-                                                 n_timesteps=n_timesteps, hyperparams=hyperparams,
-                                                 n_jobs=args.n_jobs, seed=args.seed,
-                                                 sampler_method=args.sampler, pruner_method=args.pruner,
-                                                 verbose=args.verbose)
+                    def create_model(*_args, **kwargs):
+                        """
+                        Helper to create a model with different hyperparameters
+                        """
+                        return ALGOS[args.algo](env=create_env(n_envs), tensorboard_log=tensorboard_log,
+                                                verbose=0, **kwargs)
 
-            report_name = "report_{}_{}-trials-{}-{}-{}.csv".format(env_id, args.n_trials, n_timesteps,
-                                                                    args.sampler, args.pruner)
 
-            log_path = os.path.join(args.log_folder, args.algo, report_name)
+                    data_frame = hyperparam_optimization(args.algo, create_model, create_env, n_trials=args.n_trials,
+                                                         n_timesteps=n_timesteps, hyperparams=hyperparams,
+                                                         n_jobs=args.n_jobs, seed=args.seed,
+                                                         sampler_method=args.sampler, pruner_method=args.pruner,
+                                                         verbose=args.verbose)
 
-            if args.verbose:
-                print("Writing report to {}".format(log_path))
+                    report_name = "report_{}_{}-trials-{}-{}-{}.csv".format(env_id, args.n_trials, n_timesteps,
+                                                                            args.sampler, args.pruner)
 
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            data_frame.to_csv(log_path)
-            exit()
-        else:
-            # Train an agent from scratch
-            model = ALGOS[args.algo](env=env, tensorboard_log=tensorboard_log, verbose=args.verbose, **hyperparams)
+                    log_path = os.path.join(args.log_folder, args.algo, report_name)
 
-        kwargs = {}
-        if args.log_interval > -1:
-            kwargs = {'log_interval': args.log_interval}
+                    if args.verbose:
+                        print("Writing report to {}".format(log_path))
 
-        model.learn(n_timesteps, **kwargs)
+                    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                    data_frame.to_csv(log_path)
+                    exit()
+                else:
+                    # Train an agent from scratch
+                    model = ALGOS[args.algo](env=env, tensorboard_log=tensorboard_log, verbose=args.verbose, **hyperparams)
+
+                kwargs = {}
+                if args.log_interval > -1:
+                    kwargs = {'log_interval': args.log_interval}
+
+        with iml.prof.operation('train'):
+            model.learn(n_timesteps, **kwargs)
 
         # Save trained model
-        log_path = "{}/{}/".format(args.log_folder, args.algo)
-        save_path = os.path.join(log_path, "{}_{}".format(env_id, get_latest_run_id(log_path, env_id) + 1))
-        params_path = "{}/{}".format(save_path, env_id)
+        paths = get_paths(args, env_id)
+        log_path = paths['log_path']
+        save_path = paths['save_path']
+        params_path = paths['params_path']
         os.makedirs(params_path, exist_ok=True)
 
         # Only save worker of rank 0 when using mpi
