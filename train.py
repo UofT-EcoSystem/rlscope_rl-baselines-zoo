@@ -27,6 +27,8 @@ from stable_baselines.common.vec_env import VecFrameStack, SubprocVecEnv, VecNor
 from stable_baselines.ddpg import AdaptiveParamNoiseSpec, NormalActionNoise, OrnsteinUhlenbeckActionNoise
 from stable_baselines.ppo2.ppo2 import constfn
 
+from stable_baselines.iml import wrap_pybullet, unwrap_pybullet
+
 from utils import make_env, ALGOS, linear_schedule, get_latest_run_id, get_wrapper_class
 from utils.hyperparams_opt import hyperparam_optimization
 
@@ -94,6 +96,7 @@ if __name__ == '__main__':
                         type=int)
     parser.add_argument('--gym-packages', type=str, nargs='+', default=[], help='Additional external Gym environemnt package modules to import (e.g. gym_minigrid)')
     iml.add_iml_arguments(parser)
+    iml.register_wrap_module(wrap_pybullet, unwrap_pybullet)
     args = parser.parse_args()
 
     # Going through custom gym packages to let them register in the global registory
@@ -366,7 +369,15 @@ if __name__ == '__main__':
                     kwargs = {'log_interval': args.log_interval}
 
         with iml.prof.operation('train'):
+            # try:
             model.learn(n_timesteps, **kwargs)
+            # except Exception as e:
+            #     print("> IML: Detected exception:")
+            #     print(e)
+            #     print("> Entering pdb:")
+            #     import ipdb
+            #     ipdb.post_mortem()
+            #     raise
 
         # Save trained model
         paths = get_paths(args, env_id)
