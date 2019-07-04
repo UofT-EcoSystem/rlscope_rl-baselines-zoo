@@ -165,7 +165,8 @@ def create_test_env(env_id, n_envs=1, is_atari=False,
         env = VecFrameStack(env, n_stack=4)
     elif n_envs > 1:
         # start_method = 'spawn' for thread safe
-        env = SubprocVecEnv([make_env(env_id, i, seed, log_dir, wrapper_class=env_wrapper) for i in range(n_envs)])
+        # env = SubprocVecEnv([make_env(env_id, i, seed, log_dir, wrapper_class=env_wrapper) for i in range(n_envs)])
+        env = DummyVecEnv([make_env(env_id, i, seed, log_dir, wrapper_class=env_wrapper) for i in range(n_envs)])
     # Pybullet envs does not follow gym.render() interface
     elif "Bullet" in env_id:
         spec = gym.envs.registry.env_specs[env_id]
@@ -191,7 +192,8 @@ def create_test_env(env_id, n_envs=1, is_atari=False,
             return env
 
         if use_subproc:
-            env = SubprocVecEnv([make_env(env_id, 0, seed, log_dir, wrapper_class=env_wrapper)])
+            # env = SubprocVecEnv([make_env(env_id, 0, seed, log_dir, wrapper_class=env_wrapper)])
+            env = DummyVecEnv([make_env(env_id, 0, seed, log_dir, wrapper_class=env_wrapper)])
         else:
             env = DummyVecEnv([_init])
     else:

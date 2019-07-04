@@ -23,6 +23,8 @@ from stable_baselines.common.vec_env import VecNormalize, VecFrameStack, VecEnv
 
 from utils import ALGOS, create_test_env, get_latest_run_id, get_saved_hyperparams
 
+from stable_baselines.iml import wrap_pybullet, unwrap_pybullet
+
 import iml_profiler.api as iml
 
 # Fix for breaking change in v2.6.0
@@ -62,6 +64,7 @@ def main():
     parser.add_argument('--reward-log', help='Where to log reward', default='', type=str)
     parser.add_argument('--gym-packages', type=str, nargs='+', default=[], help='Additional external Gym environemnt package modules to import (e.g. gym_minigrid)')
     iml.add_iml_arguments(parser)
+    iml.register_wrap_module(wrap_pybullet, unwrap_pybullet)
     args = parser.parse_args()
 
     log_dir = args.reward_log if args.reward_log != '' else None
