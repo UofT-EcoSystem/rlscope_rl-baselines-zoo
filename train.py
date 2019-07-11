@@ -128,7 +128,9 @@ if __name__ == '__main__':
     #         └── CartPole-v1.pkl
     paths = get_paths(args, env_ids[0])
     iml_directory = paths['iml_directory']
-    iml.handle_iml_args(parser, args, directory=iml_directory)
+    iml.handle_iml_args(parser, args,
+                        directory=iml_directory,
+                        reports_progress=True)
 
     process_name = get_process_name(args)
     phase_name = process_name
