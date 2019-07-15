@@ -370,16 +370,15 @@ if __name__ == '__main__':
                 if args.log_interval > -1:
                     kwargs = {'log_interval': args.log_interval}
 
-        with iml.prof.operation('train'):
-            # try:
-            model.learn(n_timesteps, **kwargs)
-            # except Exception as e:
-            #     print("> IML: Detected exception:")
-            #     print(e)
-            #     print("> Entering pdb:")
-            #     import ipdb
-            #     ipdb.post_mortem()
-            #     raise
+        # try:
+        model.learn(n_timesteps, **kwargs)
+        # except Exception as e:
+        #     print("> IML: Detected exception:")
+        #     print(e)
+        #     print("> Entering pdb:")
+        #     import ipdb
+        #     ipdb.post_mortem()
+        #     raise
 
         # Save trained model
         paths = get_paths(args, env_id)
