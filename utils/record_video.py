@@ -31,7 +31,10 @@ algo = args.algo
 folder = args.folder
 video_folder = args.output_folder
 seed = args.seed
-deterministic = args.deterministic
+
+# Force deterministic for DQN, DDPG, SAC and HER (that is a wrapper around)
+deterministic = args.deterministic or algo in ['dqn', 'ddpg', 'sac', 'her']
+
 video_length = args.n_timesteps
 n_envs = args.n_envs
 
@@ -71,7 +74,12 @@ for _ in range(video_length + 1):
     action, _ = model.predict(obs, deterministic=deterministic)
     if isinstance(env.action_space, gym.spaces.Box):
         action = np.clip(action, env.action_space.low, env.action_space.high)
-    obs, _, _, _ = env.step(action)
+    obs, reward, done, infos = env.step(action)
+    if is_atari and infos is not None:
+        episode_infos = infos[0].get('episode')
+        if episode_infos is not None:
+            print("Atari Episode Score: {:.2f}".format(episode_infos['r']))
+            print("Atari Episode Length", episode_infos['l'])
 
 # Workaround for https://github.com/openai/gym/issues/893
 if n_envs == 1 and 'Bullet' not in env_id and not is_atari:
