@@ -1,4 +1,5 @@
 import argparse
+import time
 import difflib
 import os
 from collections import OrderedDict
@@ -371,6 +372,12 @@ if __name__ == '__main__':
                     kwargs = {'log_interval': args.log_interval}
 
         # try:
+        # IML: only support running with 1 environment at time.
+        assert len(args.env) == 1
+        iml.prof.set_metadata({
+            'algo': args.algo,
+            'env': args.env[0],
+        })
         model.learn(n_timesteps, **kwargs)
         # except Exception as e:
         #     print("> IML: Detected exception:")
