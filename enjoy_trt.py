@@ -8,6 +8,52 @@ import pkg_resources
 import importlib
 import json
 import codecs
+import pprint
+import subprocess
+import io
+import traceback
+import textwrap
+import re
+import logging
+logger = logging.getLogger(__name__)
+
+from google.protobuf.json_format import MessageToJson
+from google.protobuf.json_format import MessageToDict
+
+import pycuda.driver as cuda
+# This import causes pycuda to automatically manage CUDA context creation and cleanup.
+import pycuda.autoinit
+
+import tensorflow as tf
+
+# orig_tf_cast = tf.cast
+# def wrap_tf_cast(*args, **kwargs):
+#     # import ipdb; ipdb.set_trace()
+#     buf = io.StringIO()
+#     traceback.print_stack(file=buf)
+#     print("> tf.cast(...) called:\n{msg}".format(msg=textwrap.indent(buf.getvalue(), prefix='  ')))
+#     return orig_tf_cast(*args, **kwargs)
+# tf.cast = wrap_tf_cast
+
+# orig_tf_random_uniform = tf.random.uniform
+# def wrap_tf_random_uniform(*args, **kwargs):
+#     # import ipdb; ipdb.set_trace()
+#     buf = io.StringIO()
+#     traceback.print_stack(file=buf)
+#     print("> tf.random.uniform(...) called:\n{msg}".format(msg=textwrap.indent(buf.getvalue(), prefix='  ')))
+#     return orig_tf_random_uniform(*args, **kwargs)
+# tf.random.uniform = wrap_tf_random_uniform
+
+# orig_tf_strided_slice = tf.strided_slice
+# def wrap_tf_strided_slice(*args, **kwargs):
+#     # import ipdb; ipdb.set_trace()
+#     buf = io.StringIO()
+#     traceback.print_stack(file=buf)
+#     print("> tf.strided_slice(...) called:\n{msg}".format(msg=textwrap.indent(buf.getvalue(), prefix='  ')))
+#     return orig_tf_strided_slice(*args, **kwargs)
+# tf.strided_slice = wrap_tf_strided_slice
+
+import tensorrt as trt
 
 from os.path import join as _j, abspath as _a, exists as _e, dirname as _d, basename as _b
 
@@ -51,14 +97,20 @@ def dump_json(data, path):
               skipkeys=False)
 
 class JsonFile:
-    def __init__(self, path, empty_js=None, debug=False):
+    def __init__(self, path, mode='r', empty_js=None, debug=False):
         """
         :param path:
+        :param mode:
+            r  => read the json file (it should exist)
+            w  => DON'T read json file (even if it exists)
+            rw => read the json file if it exists
         :param empty_js:
             Template js object to use if no json file exists.
         :param debug:
         """
         self.path = path
+        self.mode = mode
+        assert mode in {'r', 'w', 'rw'}
         self.empty_js = None
         self.debug = debug
         self._load()
@@ -76,7 +128,10 @@ class JsonFile:
         dump_json(self.js, self.path)
 
     def _load(self):
-        if _e(self.path):
+        if self.mode == 'r' and not _e(self.path):
+            raise RuntimeError("Couldn't read json file from {path} since it didn't exist".format(path=self.path))
+
+        if 'r' in self.mode and _e(self.path):
             if self.debug:
                 print("> Load json @ {path}".format(
                     path=self.path,
@@ -108,6 +163,7 @@ def get_process_name(args):
     return process_name
 
 def main():
+    setup_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', help='environment ID', type=str, default='CartPole-v1')
     parser.add_argument('-f', '--folder', help='Log folder', type=str, default='trained_agents')
@@ -129,7 +185,10 @@ def main():
                             'microbench_iml_python_annotation',
                             'microbench_iml_clib_interception_simulator',
                             'microbench_iml_clib_interception_tensorflow',
-                        ])
+                            'save_tensorrt',
+                            'load_tensorrt',
+                        ],
+                        default='default')
     parser.add_argument('--iterations', help='microbenchmark mode: iterations', type=int, default=1000)
     # Run repetitions from external script.
     parser.add_argument('--repetition', help='microbenchmark mode: repetitions', type=int)
@@ -297,6 +356,222 @@ class TrainedAgent:
         load_env = None if algo == 'acer' else env
         model = ALGOS[algo].load(model_path, env=load_env)
         return model
+
+    def build_engine(self, uff_model_file, input_names, input_shapes, output_names, workspace_size_bytes=None):
+        if workspace_size_bytes is None:
+            workspace_size_bytes = GiB(1)
+        network_flags = 0
+        with trt.Builder(TRT_LOGGER) as builder, builder.create_network(network_flags) as network, trt.UffParser() as parser:
+            builder.max_workspace_size = workspace_size_bytes
+            # Parse the Uff Network
+            def get_node_name(node_name):
+                m = re.search(r'(?P<node>.*):\d+$', node_name)
+                if m:
+                    return m.group('node')
+                return node_name
+            for input_name, input_shape in zip(input_names, input_shapes):
+
+                # NOTE: trtexec does NOT include a batch dimension (i.e., batch is first dimension and it's "implicit")
+                new_input_shape = []
+                for i, dim in enumerate(input_shape):
+                    if dim == -1:
+                        assert i == 0
+                        continue
+                    else:
+                        new_input_shape.append(dim)
+
+                new_input_name = get_node_name(input_name)
+                logger.info(trt_log_msg(f"parser.register_input: {new_input_name}, {new_input_shape}"))
+                # NOTE: default format is trt.UffInputOrder.NCHW, but [?, 84, 84, 4] is NHWC.
+                parser.register_input(new_input_name, new_input_shape, trt.tensorrt.UffInputOrder.NHWC)
+            for output_name in output_names:
+                new_output_name = get_node_name(output_name)
+                logger.info(trt_log_msg(f"parser.register_output: {new_output_name}"))
+                parser.register_output(new_output_name)
+            parse_ret = parser.parse(uff_model_file, network)
+            if not parse_ret:
+                raise RuntimeError("tensorrt.UffParser failed to parse model @ {path}".format(path=uff_model_file))
+
+            # Build and return an engine.
+            engine = builder.build_cuda_engine(network)
+            assert engine is not None
+            return engine
+
+    def uff_model_path(self, model_base):
+        return "{base}.uff".format(
+            base=model_base)
+
+    def tf_model_path(self, model_base):
+        return "{base}.pb".format(
+            base=model_base)
+
+    def tf_model_json_path(self, model_base):
+        return "{base}.metadata.json".format(
+            base=model_base)
+
+    def tf_model_inputs_path(self, model_base):
+        return "{base}.inputs.txt".format(
+            base=model_base)
+
+    def tf_model_outputs_path(self, model_base):
+        return "{base}.outputs.txt".format(
+            base=model_base)
+
+    def with_trt_model(self, model_base, func):
+        # data_paths, _ = common.find_sample_data(description="Runs an MNIST network using a UFF model file", subfolder="mnist")
+        # model_path = os.environ.get("MODEL_PATH") or os.path.join(os.path.dirname(__file__), "models")
+        # model_file = os.path.join(model_path, ModelData.MODEL_FILE)
+
+        js = JsonFile(self.tf_model_json_path(model_base), mode='r')
+        input_names = [node["name"] for node in js["inputs"]]
+        input_shapes = [node["shape"] for node in js["inputs"]]
+        output_names = [node["name"] for node in js["outputs"]]
+        with self.build_engine(self.uff_model_path(model_base), input_names, input_shapes, output_names) as engine:
+            # Build an engine, allocate buffers and create a stream.
+            # For more information on buffer allocation, refer to the introductory samples.
+            # inputs, outputs, bindings, stream = allocate_buffers(engine)
+            with engine.create_execution_context() as execution_context:
+                # For more information on performing inference, refer to the introductory samples.
+                # The common.do_inference function will return a list of outputs - we only have one in this case.
+                trt_ctx = TRTContext(engine, execution_context)
+                ret = func(trt_ctx)
+                return ret
+
+    def save_tf_model(self, model, model_base):
+        # First freeze the graph and remove training nodes.
+        # output_names = model.output.op.name
+        inputs = model.inputs()
+        outputs = model.outputs()
+        # NOTE: node.name has a trailing ":0", presumably tell us the device it's been placed on.
+        output_names = [node.op.name for node in outputs]
+        # sess = tf.keras.backend.get_session()
+        # sess = tf.compat.v1.get_default_session()
+        sess = model.sess
+        graph = model.graph
+        # graph = outputs[0].graph
+        # graph = tf.compat.v1.get_default_graph()
+        # graph = sess.graph
+        frozen_graph = tf.compat.v1.graph_util.convert_variables_to_constants(
+            sess, graph.as_graph_def(),
+            # [output_names]
+            # outputs,
+            output_names,
+        )
+        frozen_graph = tf.compat.v1.graph_util.remove_training_nodes(frozen_graph)
+        # Save the model
+        print(f"> Save TensorFlow proto model to {model_base}")
+
+        js = JsonFile(self.tf_model_json_path(model_base), mode='w')
+
+        def _output_nodes(js, nodes):
+            for node in nodes:
+                shape = []
+                for dim in node.shape.as_list():
+                    if dim is None:
+                        shape.append(-1)
+                    else:
+                        shape.append(dim)
+                js.append({
+                    'name': node.name,
+                    'shape': shape,
+                })
+        js['outputs'] = []
+        _output_nodes(js['outputs'], outputs)
+        js['inputs'] = []
+        _output_nodes(js['inputs'], inputs)
+
+        def _output_all_nodes(js, nodes):
+            def _as_dict(proto):
+                return dict((key, value) for key, value in proto.items())
+
+            def _remove_keys(dic, keys):
+                for k in keys:
+                    if k in dic:
+                        del dic[k]
+
+            for node in nodes:
+                node_js = MessageToDict(node)
+                if ( "attr" in node_js
+                        and "value" in node_js["attr"]
+                        and "tensor" in node_js["attr"]["value"]
+                        and "tensorContent" in node_js["attr"]["value"]["tensor"]
+                    ):
+                    del node_js["attr"]["value"]["tensor"]["tensorContent"]
+
+                js.append(node_js)
+
+        js['nodes'] = []
+        _output_all_nodes(js['nodes'], frozen_graph.node)
+
+        js.dump()
+
+        with open(self.tf_model_path(model_base), "wb") as ofile:
+            ofile.write(frozen_graph.SerializeToString())
+
+        # Needed for tf2onnx tool when converting from "graphdef" format
+        # https://github.com/onnx/tensorflow-onnx#getting-started
+
+        with open(self.tf_model_outputs_path(model_base), "w") as f:
+            for node in outputs:
+                f.write(node.name)
+                f.write("\n")
+
+        with open(self.tf_model_inputs_path(model_base), "w") as f:
+            for node in inputs:
+                f.write(node.name)
+                f.write("\n")
+
+    def mode_save_tensorrt(self):
+        args = self.args
+        parser = self.parser
+
+        algo = args.algo
+
+        # self.handle_iml(reports_progress=False)
+        env = self.make_env()
+        model = self.make_model(env)
+        env_id = args.env
+
+        is_atari = self.is_atari()
+
+        obs = env.reset()
+
+        model_base = _j(".", "tf_model")
+        tf_model_path = self.tf_model_path(model_base)
+        uff_model_path = self.uff_model_path(model_base)
+        self.save_tf_model(model, model_base)
+        subprocess.check_call(['convert-to-uff', tf_model_path])
+
+    def mode_load_tensorrt(self):
+        args = self.args
+        parser = self.parser
+
+        algo = args.algo
+
+        # self.handle_iml(reports_progress=False)
+        env = self.make_env()
+        model = self.make_model(env)
+        env_id = args.env
+
+        is_atari = self.is_atari()
+
+        obs = env.reset()
+
+        model_base = _j(".", "tf_model")
+        tf_model_path = self.tf_model_path(model_base)
+        uff_model_path = self.uff_model_path(model_base)
+
+        # Make sure we can run inference using the model on TensorRT
+        if os.path.exists(uff_model_path):
+            print("> Running inference with TensorRT...")
+            def inference(trt_ctx):
+                obs = env.observation_space.low
+                ret = trt_ctx.inference([obs])
+                print("> Ran inference with TensorRT:\n{msg}".format(msg=pprint.pformat({
+                    'obs': obs,
+                    'ret': ret,
+                })))
+            self.with_trt_model(model_base, inference)
 
     def mode_default(self):
         args = self.args
@@ -619,10 +894,136 @@ class TrainedAgent:
             self.mode_microbench_iml_clib_interception_simulator()
         elif args.mode == 'microbench_iml_clib_interception_tensorflow':
             self.mode_microbench_iml_clib_interception_tensorflow()
+        elif args.mode == 'save_tensorrt':
+            self.mode_save_tensorrt()
+        elif args.mode == 'load_tensorrt':
+            self.mode_load_tensorrt()
         else:
             raise NotImplementedError("Note sure how to run --mode={mode}".format(
                 mode=args.mode))
 
+
+# You can set the logger severity higher to suppress messages (or lower to display more messages).
+# TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE)
+
+class ModelData(object):
+    MODEL_FILE = "lenet5.uff"
+    INPUT_NAME ="input_1"
+    INPUT_SHAPE = (1, 28, 28)
+    OUTPUT_NAME = "dense_1/Softmax"
+
+def GiB(val):
+    return val * 1 << 30
+
+def build_engine(model_file):
+    # For more information on TRT basics, refer to the introductory samples.
+    with trt.Builder(TRT_LOGGER) as builder, builder.create_network() as network, trt.UffParser() as parser:
+        builder.max_workspace_size = GiB(1)
+        # Parse the Uff Network
+        parser.register_input(ModelData.INPUT_NAME, ModelData.INPUT_SHAPE)
+        parser.register_output(ModelData.OUTPUT_NAME)
+        parser.parse(model_file, network)
+        # Build and return an engine.
+        engine = builder.build_cuda_engine(network)
+        assert engine is not None
+        return engine
+
+# Simple helper data class that's a little nicer to use than a 2-tuple.
+class HostDeviceMem(object):
+    def __init__(self, host_mem, device_mem):
+        self.host = host_mem
+        self.device = device_mem
+
+    def size_bytes(self):
+        return self.host.nbytes
+
+    def __str__(self):
+        return "Host:\n" + str(self.host) + "\nDevice:\n" + str(self.device)
+
+    def __repr__(self):
+        return self.__str__()
+
+# Allocates all buffers required for an engine, i.e. host/device inputs/outputs.
+def allocate_buffers(engine):
+    inputs = []
+    outputs = []
+    bindings = []
+    stream = cuda.Stream()
+    for binding in engine:
+        max_batch_size = engine.max_batch_size
+        shape = engine.get_binding_shape(binding)
+        volume = trt.volume(shape)
+        size = volume * max_batch_size
+        dtype = trt.nptype(engine.get_binding_dtype(binding))
+        # Allocate host and device buffers
+        host_mem = cuda.pagelocked_empty(size, dtype)
+        device_mem = cuda.mem_alloc(host_mem.nbytes)
+        assert np.dtype(dtype).itemsize*size == host_mem.nbytes
+        # Append the device buffer to device bindings.
+        bindings.append(int(device_mem))
+        # Append to the appropriate list.
+        if engine.binding_is_input(binding):
+            buffer_type = 'input'
+            inputs.append(HostDeviceMem(host_mem, device_mem))
+        else:
+            buffer_type = 'output'
+            outputs.append(HostDeviceMem(host_mem, device_mem))
+        logger.info(trt_log_msg(f"buftype={buffer_type}, binding={binding}, shape={shape}, max_batch_size={max_batch_size}, volume={volume}, dtype={dtype}"))
+    return inputs, outputs, bindings, stream
+
+# This function is generalized for multiple inputs/outputs.
+# inputs and outputs are expected to be lists of HostDeviceMem objects.
+def do_inference(context, bindings, inputs, outputs, stream, batch_size=1):
+    # Transfer input data to the GPU.
+    [cuda.memcpy_htod_async(inp.device, inp.host, stream) for inp in inputs]
+    # Run inference.
+    context.execute_async(batch_size=batch_size, bindings=bindings, stream_handle=stream.handle)
+    # Transfer predictions back from the GPU.
+    [cuda.memcpy_dtoh_async(out.host, out.device, stream) for out in outputs]
+    # Synchronize the stream
+    stream.synchronize()
+    # Return only the host outputs.
+    return [out.host for out in outputs]
+
+class TRTContext:
+    def __init__(self,
+                 engine,
+                 execution_context,
+                 # execution_context, bindings, inputs, outputs, stream
+                 ):
+        self.engine = engine
+        self.inputs, self.outputs, self.bindings, self.stream = allocate_buffers(self.engine)
+        self.execution_context = execution_context
+
+    def inference(self, inputs):
+        assert len(self.inputs) == len(inputs)
+        for i in range(len(inputs)):
+            # assert inputs[i].nbytes == self.inputs[i].size_bytes()
+            # NOTE: np.copyto will allow conversion from uint8 to float32
+            assert inputs[i].size == self.inputs[i].size
+
+        for i in range(len(inputs)):
+            # Copy to page-locked host-side buffer.
+            # do_inference will copy from self.inputs[i].host to self.inputs[i].device
+            np.copyto(self.inputs[i].host, np.ravel(inputs[i]))
+
+        outputs = do_inference(self.execution_context, self.bindings, self.inputs, self.outputs, self.stream)
+        assert len(outputs) == 1
+        output = outputs[0]
+
+        return output
+
+def log_msg(tag, msg):
+    return f"[{tag}] {msg}"
+
+def trt_log_msg(msg):
+    return log_msg('TRT', msg)
+
+def setup_logging():
+    format = 'PID={process}/{processName} @ {funcName}, {filename}:{lineno} :: {asctime} {levelname}: {message}'
+    logging.basicConfig(format=format, style='{')
+    logger.setLevel(logging.INFO)
 
 if __name__ == '__main__':
     main()

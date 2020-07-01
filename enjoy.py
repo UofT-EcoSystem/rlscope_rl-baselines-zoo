@@ -129,7 +129,8 @@ def main():
                             'microbench_iml_python_annotation',
                             'microbench_iml_clib_interception_simulator',
                             'microbench_iml_clib_interception_tensorflow',
-                        ])
+                        ],
+                        default='default')
     parser.add_argument('--iterations', help='microbenchmark mode: iterations', type=int, default=1000)
     # Run repetitions from external script.
     parser.add_argument('--repetition', help='microbenchmark mode: repetitions', type=int)
