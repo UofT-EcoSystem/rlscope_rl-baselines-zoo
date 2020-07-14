@@ -177,6 +177,8 @@ def main():
                         type=int)
     parser.add_argument('--verbose', help='Verbose mode (0: no output, 1: INFO)', default=1,
                         type=int)
+    parser.add_argument('--debug', action='store_true',
+                        help='debug')
 
 
     parser.add_argument('--mode', help='IML: mode of execution',
@@ -187,6 +189,7 @@ def main():
                             'microbench_iml_clib_interception_tensorflow',
                             'save_tensorrt',
                             'load_tensorrt',
+                            'microbench_inference',
                         ],
                         default='default')
     parser.add_argument('--iterations', help='microbenchmark mode: iterations', type=int, default=1000)
@@ -206,7 +209,22 @@ def main():
     parser.add_argument('--gym-packages', type=str, nargs='+', default=[], help='Additional external Gym environemnt package modules to import (e.g. gym_minigrid)')
     iml.add_iml_arguments(parser)
     iml.register_wrap_module(wrap_pybullet, unwrap_pybullet)
-    args = parser.parse_args()
+    args, argv = parser.parse_known_args()
+
+    if args.mode == 'microbench_inference':
+        subparser = argparse.ArgumentParser("Microbenchmark TensorFlow inference throughput/latency on random data.")
+        subparser.add_argument('--batch-size', type=int, default=1, help="Number of random samples per minibatch")
+        subparser.add_argument('--inference-starts', type=int, default=0)
+        subparser.add_argument('--warmup-iters', type=int, default=100)
+        subparser_args = subparser.parse_args(argv)
+        for attr, value in vars(subparser_args).items():
+            if hasattr(args, attr):
+                raise RuntimeError("Main argument parser already has --{opt}, but {mode} subparser has conflicting --{opt}".format(
+                    opt=attr,
+                    mode=args.mode,
+                ))
+                # assert not hasattr(args, attr)
+            setattr(args, attr, value)
 
     trained_agent = TrainedAgent(args, parser)
     trained_agent.run()
@@ -573,6 +591,211 @@ class TrainedAgent:
                 })))
             self.with_trt_model(model_base, inference)
 
+    def mode_microbench_inference(self):
+        args = self.args
+        parser = self.parser
+
+        algo = args.algo
+
+        self.handle_iml(reports_progress=True)
+        env = self.make_env()
+        model = self.make_model(env)
+        env_id = args.env
+
+        is_atari = self.is_atari()
+
+        obs = env.reset()
+
+        # Force deterministic for DQN, DDPG, SAC and HER (that is a wrapper around)
+        deterministic = args.deterministic or algo in ['dqn', 'ddpg', 'sac', 'her'] and not args.stochastic
+
+        obs_space = env.observation_space
+        # Q: Does observation_space already include the batch size...?
+
+        def random_minibatch(batch_size, obs_space):
+            shape = (batch_size,) + obs_space.shape
+            batch = np.random.uniform(size=shape)
+            return batch
+
+        def is_warmed_up(t, operations_seen, operations_available):
+            """
+            Return true once we are executing the full training-loop.
+
+            :return:
+            """
+            assert operations_seen.issubset(operations_available)
+            # can_sample = self.replay_buffer.can_sample(self.batch_size)
+            # return can_sample and operations_seen == operations_available and self.num_timesteps > self.learning_starts
+
+            return operations_seen == operations_available and \
+                   t > args.warmup_iters and \
+                   ( args.inference_starts == 0 or t > args.inference_starts )
+
+        operations_available = {'inference_loop', 'inference'}
+        operations_seen = set()
+        def iml_prof_operation(operation):
+            should_skip = operation not in operations_available
+            op = iml.prof.operation(operation, skip=should_skip)
+            if not should_skip:
+                operations_seen.add(operation)
+            return op
+
+        process_name = get_process_name(args)
+        phase_name = process_name
+        random_obs = random_minibatch(args.batch_size, obs_space)
+        logger.info(log_msg('INFER', "using --batch-size={batch} => {shape}".format(
+            batch=args.batch_size,
+            shape=random_obs.shape,
+        )))
+        # Q: How long to run for...?
+        # Shouldn't matter...? Long enough to obtain SM metrics.
+        # Q: Will it end early?
+        # Q: Can we do multiple minibatch sizes in a single run?
+
+        # Set some default trace-collection termination conditions (if not set via the cmdline).
+        # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
+        #
+        # NOTE: DQN and SAC both call iml.prof.report_progress after each timestep
+        # (hence, we run lots more iterations than DDPG/PPO).
+        #iml.prof.set_max_training_loop_iters(10000, skip_if_set=True)
+        #iml.prof.set_delay_training_loop_iters(10, skip_if_set=True)
+        # iml.prof.set_max_passes(10, skip_if_set=True)
+        # 1 configuration pass.
+        # iml.prof.set_delay_passes(1, skip_if_set=True)
+        iml.prof.set_max_training_loop_iters(args.n_timesteps*2, skip_if_set=False)
+
+        if not iml.prof.delay:
+            parser.error("You must use --iml-delay for --mode={mode}".format(mode=args.mode))
+
+        with iml.prof.profile(process_name=process_name, phase_name=phase_name):
+            # episode_reward = 0.0
+            # episode_rewards = []
+            # ep_len = 0
+            # # For HER, monitor success rate
+            # successes = []
+
+            warmed_up = False
+            inference_time_sec = []
+            for t in range(args.n_timesteps):
+
+                if iml.prof.delay and is_warmed_up(t, operations_seen, operations_available) and not iml.prof.tracing_enabled:
+                    # Entire training loop is now running; enable IML tracing
+                    logger.info(log_msg('RLS', "ENABLE TRACING"))
+                    iml.prof.enable_tracing()
+                    start_t = time.time()
+                    start_timesteps = t
+                    warmed_up = True
+
+                if args.debug:
+                    logger.info(
+                        log_msg('RLS',
+                                textwrap.dedent(f"""\
+                                @ t={t}: operations_seen = {operations_seen}
+                                  waiting for = {operations_available.difference(operations_seen)}
+                    """)).rstrip())
+                if operations_seen == operations_available:
+                    operations_seen.clear()
+                    if args.debug:
+                        logger.info(log_msg('RLS', f"iml.prof.report_progress: t={t}"))
+                    iml.prof.report_progress(
+                        percent_complete=t/float(args.n_timesteps),
+                        num_timesteps=t,
+                        total_timesteps=args.n_timesteps)
+
+                with iml_prof_operation('inference_loop'):
+                    with iml_prof_operation('inference'):
+                        start_inference_t = time.time()
+                        action, _ = model.predict(random_obs, deterministic=deterministic)
+                        end_inference_t = time.time()
+                        if warmed_up:
+                            inf_time_sec = end_inference_t - start_inference_t
+                            inference_time_sec.append(inf_time_sec)
+
+                        # Random Agent
+                        # action = [env.action_space.sample()]
+                        # Clip Action to avoid out of bound errors
+                        # if isinstance(env.action_space, gym.spaces.Box):
+                        #     action = np.clip(action, env.action_space.low, env.action_space.high)
+                    # with iml.prof.operation('step'):
+                    #     obs, reward, done, infos = env.step(action)
+                    # if not args.no_render:
+                    #     env.render('human')
+                    #
+                    # episode_reward += reward[0]
+                    # ep_len += 1
+                    #
+                    # if args.n_envs == 1:
+                    #     # For atari the return reward is not the atari score
+                    #     # so we have to get it from the infos dict
+                    #     if is_atari and infos is not None and args.verbose >= 1:
+                    #         episode_infos = infos[0].get('episode')
+                    #         if episode_infos is not None:
+                    #             print("Atari Episode Score: {:.2f}".format(episode_infos['r']))
+                    #             print("Atari Episode Length", episode_infos['l'])
+                    #
+                    #     if done and not is_atari and args.verbose > 0:
+                    #         # NOTE: for env using VecNormalize, the mean reward
+                    #         # is a normalized reward when `--norm_reward` flag is passed
+                    #         print("Episode Reward: {:.2f}".format(episode_reward))
+                    #         print("Episode Length", ep_len)
+                    #         episode_rewards.append(episode_reward)
+                    #         episode_reward = 0.0
+                    #         ep_len = 0
+                    #
+                    #     # Reset also when the goal is achieved when using HER
+                    #     if done or infos[0].get('is_success', False):
+                    #         if args.algo == 'her' and args.verbose > 1:
+                    #             print("Success?", infos[0].get('is_success', False))
+                    #         # Alternatively, you can add a check to wait for the end of the episode
+                    #         # if done:
+                    #         obs = env.reset()
+                    #         if args.algo == 'her':
+                    #             successes.append(infos[0].get('is_success', False))
+                    #             episode_reward, ep_len = 0.0, 0
+
+            end_t = time.time()
+            iml.prof.report_progress(
+                percent_complete=1,
+                num_timesteps=args.n_timesteps,
+                total_timesteps=args.n_timesteps)
+
+            inference_time_sec = np.array(inference_time_sec)
+            # total_time_sec = (end_t - start_t)
+            total_time_sec = np.sum(inference_time_sec)
+            # total_samples = (args.n_timesteps - start_timesteps)*args.batch_size
+            total_samples = len(inference_time_sec)*args.batch_size
+            throughput_qps = total_samples / total_time_sec
+            inference_js = dict()
+            inference_js['raw_samples'] = dict()
+            inference_js['summary_metrics'] = dict()
+            inference_js['raw_samples']['inference_time_sec'] = inference_time_sec.tolist()
+            inference_js['summary_metrics']['throughput_qps'] = throughput_qps
+            inference_js['summary_metrics']['total_samples'] = total_samples
+            inference_js['summary_metrics']['batch_size'] = args.batch_size
+            inference_js['summary_metrics']['total_time_sec'] = total_time_sec
+            inference_js['summary_metrics']['mean_inference_time_sec'] = inference_time_sec.mean()
+            inference_js['summary_metrics']['inference_time_percentile_99_sec'] = np.percentile(inference_time_sec, 0.99)
+            do_dump_json(inference_js, _j(iml.prof.directory, 'mode_microbench_inference.json'))
+
+
+            # if args.verbose > 0 and len(successes) > 0:
+            #     print("Success rate: {:.2f}%".format(100 * np.mean(successes)))
+            #
+            # if args.verbose > 0 and len(episode_rewards) > 0:
+            #     print("Mean reward: {:.2f}".format(np.mean(episode_rewards)))
+
+            # Workaround for https://github.com/openai/gym/issues/893
+            if not args.no_render:
+                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, VecEnv):
+                    # DummyVecEnv
+                    # Unwrap env
+                    while isinstance(env, VecNormalize) or isinstance(env, VecFrameStack):
+                        env = env.venv
+                    env.envs[0].env.close()
+                else:
+                    # SubprocVecEnv
+                    env.close()
+
     def mode_default(self):
         args = self.args
         parser = self.parser
@@ -898,6 +1121,8 @@ class TrainedAgent:
             self.mode_save_tensorrt()
         elif args.mode == 'load_tensorrt':
             self.mode_load_tensorrt()
+        elif args.mode == 'microbench_inference':
+            self.mode_microbench_inference()
         else:
             raise NotImplementedError("Note sure how to run --mode={mode}".format(
                 mode=args.mode))
@@ -1013,6 +1238,15 @@ class TRTContext:
         output = outputs[0]
 
         return output
+
+def do_dump_json(data, path):
+    os.makedirs(_d(path), exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump(data,
+                  f,
+                  sort_keys=True,
+                  indent=4,
+                  skipkeys=False)
 
 def log_msg(tag, msg):
     return f"[{tag}] {msg}"
