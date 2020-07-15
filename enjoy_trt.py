@@ -14,6 +14,9 @@ import io
 import traceback
 import textwrap
 import re
+
+from stable_baselines.common.vec_env import SubprocVecEnv, DummyVecEnv
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -190,8 +193,10 @@ def main():
                             'save_tensorrt',
                             'load_tensorrt',
                             'microbench_inference',
+                            'microbench_simulator',
                         ],
                         default='default')
+    parser.add_argument('--directory', help='output directory')
     parser.add_argument('--iterations', help='microbenchmark mode: iterations', type=int, default=1000)
     # Run repetitions from external script.
     parser.add_argument('--repetition', help='microbenchmark mode: repetitions', type=int)
@@ -796,6 +801,115 @@ class TrainedAgent:
                     # SubprocVecEnv
                     env.close()
 
+    def mode_microbench_simulator(self):
+        args = self.args
+        parser = self.parser
+
+        if args.directory is None:
+            parser.error("output --directory required for --mode={mode}".format(
+                mode=args.mode,
+            ))
+
+        algo = args.algo
+        # Q: How to ENSURE that we are running a SINGLE simulator instance (i.e., no subprocess crap)
+
+        # self.handle_iml(reports_progress=True)
+        if args.n_envs != 1:
+            parser.error("For --mode={mode} you must use --n-envs=1 but saw {n_envs}".format(
+                n_envs=args.n_envs,
+                mode=args.mode,
+            ))
+        env = self.make_env()
+        assert not isinstance(env, SubprocVecEnv)
+        if isinstance(env, DummyVecEnv) or isinstance(env, VecFrameStack):
+            assert len(env.envs) == 1
+        assert isinstance(env, VecEnv) and env.num_envs == 1
+        # model = self.make_model()
+        env_id = args.env
+
+        is_atari = self.is_atari()
+
+        obs = env.reset()
+
+        # Force deterministic for DQN, DDPG, SAC and HER (that is a wrapper around)
+        deterministic = self.deterministic()
+
+        step_time_sec = []
+        iterations_start_t = time.time()
+        for i in range(args.iterations):
+            # action, _ = model.predict(obs, deterministic=deterministic)
+
+            # Random Agent
+            action = [env.action_space.sample()]
+            # Clip Action to avoid out of bound errors
+            if isinstance(env.action_space, gym.spaces.Box):
+                action = np.clip(action, env.action_space.low, env.action_space.high)
+            start_t = time.time()
+            obs, reward, done, infos = env.step(action)
+            end_t = time.time()
+            time_sec = end_t - start_t
+            step_time_sec.append(time_sec)
+
+            # episode_reward += reward[0]
+            # ep_len += 1
+        iterations_end_t = time.time()
+
+        # iterations_total_sec = iterations_end_t - iterations_start_t
+        # time_sec_per_iteration = iterations_total_sec / args.iterations
+
+        # Metrics we want:
+        # - Throughput (samples per second).
+        #   - Mean
+        #   - Stdev
+        # - Latency (seconds per sample)
+        #   - Mean
+        #   - Stdev
+
+        json_path = _j(args.directory, 'mode_microbench_simulator.json')
+        js = JsonFile(json_path, mode='w')
+        step_time_sec = np.array(step_time_sec)
+
+        js['raw_samples'] = dict()
+        js['raw_samples']['step_time_sec'] = step_time_sec.tolist()
+
+        js['metadata'] = dict()
+        js['metadata']['iterations'] = args.iterations
+        js['metadata']['env'] = args.env
+
+        total_steps = len(step_time_sec)
+        total_time_sec = np.sum(step_time_sec)
+        js['summary_metrics'] = dict()
+        js['summary_metrics']['env'] = args.env
+        js['summary_metrics']['total_steps'] = total_steps
+        js['summary_metrics']['total_time_sec'] = total_time_sec
+        js['summary_metrics']['mean_step_time_sec'] = step_time_sec.mean()
+        js['summary_metrics']['stdev_step_time_sec'] = step_time_sec.std()
+        js['summary_metrics']['throughput_step_per_sec'] = total_steps / total_time_sec
+
+        # js.append('iterations_total_sec', iterations_total_sec)
+        # js.append('iterations', args.iterations)
+        # js.append('time_sec_per_iteration', time_sec_per_iteration)
+        # js['repetitions'] = js.get('repetitions', 0) + 1
+
+        print("> Dump --mode={mode} results @ {path}".format(
+            path=json_path,
+            mode=args.mode,
+        ))
+        js.dump()
+
+        # Workaround for https://github.com/openai/gym/issues/893
+        if not args.no_render:
+            if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, VecEnv):
+                # DummyVecEnv
+                # Unwrap env
+                while isinstance(env, VecNormalize) or isinstance(env, VecFrameStack):
+                    env = env.venv
+                env.envs[0].env.close()
+            else:
+                # SubprocVecEnv
+                env.close()
+
+
     def mode_default(self):
         args = self.args
         parser = self.parser
@@ -1123,6 +1237,8 @@ class TrainedAgent:
             self.mode_load_tensorrt()
         elif args.mode == 'microbench_inference':
             self.mode_microbench_inference()
+        elif args.mode == 'microbench_simulator':
+            self.mode_microbench_simulator()
         else:
             raise NotImplementedError("Note sure how to run --mode={mode}".format(
                 mode=args.mode))
