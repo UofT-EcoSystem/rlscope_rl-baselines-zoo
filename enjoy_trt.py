@@ -1,5 +1,12 @@
+import logging
+logger = logging.getLogger(__name__)
+import textwrap
+import pprint
+
+
 import argparse
 import os
+import itertools
 import warnings
 import copy
 import time
@@ -14,20 +21,21 @@ import io
 import traceback
 import textwrap
 import re
+import multiprocessing
+import threading
+from concurrent.futures.process import ProcessPoolExecutor
+from concurrent.futures.thread import ThreadPoolExecutor
+from concurrent import futures
 
-from stable_baselines.common.vec_env import SubprocVecEnv, DummyVecEnv
-
-import logging
-logger = logging.getLogger(__name__)
+# from stable_baselines.common.vec_env import SubprocVecEnv, DummyVecEnv
 
 from google.protobuf.json_format import MessageToJson
 from google.protobuf.json_format import MessageToDict
 
-import pycuda.driver as cuda
-# This import causes pycuda to automatically manage CUDA context creation and cleanup.
-import pycuda.autoinit
+# import pycuda.driver as cuda
+# # This import causes pycuda to automatically manage CUDA context creation and cleanup.
+# import pycuda.autoinit
 
-import tensorflow as tf
 
 # orig_tf_cast = tf.cast
 # def wrap_tf_cast(*args, **kwargs):
@@ -56,7 +64,7 @@ import tensorflow as tf
 #     return orig_tf_strided_slice(*args, **kwargs)
 # tf.strided_slice = wrap_tf_strided_slice
 
-import tensorrt as trt
+# import tensorrt as trt
 
 from os.path import join as _j, abspath as _a, exists as _e, dirname as _d, basename as _b
 
@@ -72,20 +80,119 @@ try:
     import highway_env
 except ImportError:
     highway_env = None
-import stable_baselines
-from stable_baselines.common import set_global_seeds
-from stable_baselines.common.vec_env import VecNormalize, VecFrameStack, VecEnv
 
-from utils import ALGOS, create_test_env, get_latest_run_id, get_saved_hyperparams
+# import stable_baselines
+# from stable_baselines.common import set_global_seeds
+# from stable_baselines.common.vec_env import VecNormalize, VecFrameStack, VecEnv
 
-from stable_baselines.iml import wrap_pybullet, unwrap_pybullet
 
-import iml_profiler.api as iml
+# import stable_baselines
+# from stable_baselines.common import set_global_seeds
+# from stable_baselines.common.vec_env import VecNormalize, VecFrameStack, VecEnv
+# from utils import ALGOS, create_test_env, get_latest_run_id, get_saved_hyperparams
+# from stable_baselines.iml import wrap_pybullet, unwrap_pybullet
+# import iml_profiler.api as iml
 
-# Fix for breaking change in v2.6.0
-if pkg_resources.get_distribution("stable_baselines").version >= "2.6.0":
-    sys.modules['stable_baselines.ddpg.memory'] = stable_baselines.deepq.replay_buffer
-    stable_baselines.deepq.replay_buffer.Memory = stable_baselines.deepq.replay_buffer.ReplayBuffer
+# import tensorflow as tf
+def init_tensorflow():
+    global tf
+    tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
+    devices = tf.config.experimental.list_physical_devices()
+    logger.info("Available devices:\n{devs}".format(
+        devs=textwrap.indent(pprint.pformat(devices), prefix='  '),
+    ))
+    cpu_devices = tf.config.experimental.list_physical_devices('CPU')
+    gpu_devices = tf.config.experimental.list_physical_devices('GPU')
+    for gpu_device in gpu_devices:
+        logger.info(f"ENABLE MEMORY GROWTH: {gpu_device}")
+        tf.config.experimental.set_memory_growth(gpu_device, True)
+# init_tensorflow()
+
+# def import_tensorflow():
+#     logger.info("Delayed import of tensorflow")
+#     # Delay import to interact better with multiprocessing.
+#     global tf
+#     if tf is not None:
+#         return
+#     # Output logging information about operator placement on CPU / GPU.
+#     # https://www.tensorflow.org/guide/gpu#logging_device_placement
+#     # NOTE: Looks like these statements is ignored if ConfigProto is created manually
+#     # (as it is in stable-baselines)
+#     # tf.debugging.set_log_device_placement(True)
+
+tf = None
+stable_baselines = None
+stable_baselines_common = None
+common_vec_env = None
+utils = None
+stable_baselines_iml = None
+iml = None
+import_tensorflow_LOADED = False
+def import_tensorflow():
+    global import_tensorflow_LOADED
+    if import_tensorflow_LOADED:
+        return
+
+    global tf
+    global stable_baselines
+    global stable_baselines_common
+    global common_vec_env
+    global utils
+    global stable_baselines_iml
+    global iml
+
+    import tensorflow as tf
+    init_tensorflow()
+
+    import stable_baselines
+    import stable_baselines.common as stable_baselines_common
+    # from stable_baselines.common.vec_env import VecNormalize, VecFrameStack, VecEnv
+    import stable_baselines.common.vec_env as common_vec_env
+    import utils
+    import stable_baselines.iml as stable_baselines_iml
+    import iml_profiler.api as iml
+
+    # Fix for breaking change in v2.6.0
+    if pkg_resources.get_distribution("stable_baselines").version >= "2.6.0":
+        sys.modules['stable_baselines.ddpg.memory'] = stable_baselines.deepq.replay_buffer
+        stable_baselines.deepq.replay_buffer.Memory = stable_baselines.deepq.replay_buffer.ReplayBuffer
+
+    import_tensorflow_LOADED = True
+
+cuda = None
+trt = None
+TRT_LOGGER = None
+import_trt_LOADED = False
+def import_trt():
+    global import_trt_LOADED
+    if import_trt_LOADED:
+        return
+    global cuda
+    global trt
+    import pycuda.driver as cuda
+    # # This import causes pycuda to automatically manage CUDA context creation and cleanup.
+    import pycuda.autoinit
+    import tensorrt as trt
+
+    # You can set the logger severity higher to suppress messages (or lower to display more messages).
+    TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE)
+
+    import_trt_LOADED = True
+
+def import_all():
+    import_tensorflow()
+    import_trt()
+
+# from utils import ALGOS, create_test_env, get_latest_run_id, get_saved_hyperparams
+
+# from stable_baselines.iml import wrap_pybullet, unwrap_pybullet
+
+# import iml_profiler.api as iml
+
+# # Fix for breaking change in v2.6.0
+# if pkg_resources.get_distribution("stable_baselines").version >= "2.6.0":
+#     sys.modules['stable_baselines.ddpg.memory'] = stable_baselines.deepq.replay_buffer
+#     stable_baselines.deepq.replay_buffer.Memory = stable_baselines.deepq.replay_buffer.ReplayBuffer
 
 def load_json(path):
     with codecs.open(path, mode='r', encoding='utf-8') as f:
@@ -165,13 +272,58 @@ def get_process_name(args):
         env=args.env)
     return process_name
 
+def add_subparser_arguments(subparser_args, args):
+    for attr, value in vars(subparser_args).items():
+        if hasattr(args, attr):
+            raise RuntimeError("Main argument parser already has --{opt}, but {mode} subparser has conflicting --{opt}".format(
+                opt=attr,
+                mode=args.mode,
+            ))
+            # assert not hasattr(args, attr)
+        setattr(args, attr, value)
+
+def _fake_worker(task_id):
+    print(f"HELLO WORLD from task_id={task_id}")
+    return task_id
+    # raise RuntimeError(f"error from task_id={task_id}")
+
+def _fake_worker_barrier(task_id, barrier):
+    print(f"task_id={task_id} arrives")
+    while True:
+        time.sleep(2)
+    barrier.wait()
+    return task_id
+    # raise RuntimeError(f"error from task_id={task_id}")
+
 def main():
     setup_logging()
+
+    # num_tasks = 3
+    # barrier = multiprocessing.Barrier(num_tasks + 1)
+    # # NOTE: we CANNOT pickle a multiprocessing.Barrier, since it results in a
+    # # deadlock before the child thread even starts...
+    # # I have NO IDEA why.
+    # # with ProcessPoolExecutor() as pool:
+    # with ThreadPoolExecutor() as pool:
+    #     results = []
+    #     for task_id in range(num_tasks):
+    #         logger.info(f"Launch fake_worker task_id={task_id}")
+    #         results.append(pool.submit(_fake_worker_barrier, task_id, barrier))
+    #     logger.info("Wait for tasks in parent")
+    #     barrier.wait()
+    #     logger.info("All tasks done")
+    #     for task_id, future in enumerate(results):
+    #         result = future.result()
+    #         assert result == task_id
+    #     sys.exit(1)
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', help='environment ID', type=str, default='CartPole-v1')
     parser.add_argument('-f', '--folder', help='Log folder', type=str, default='trained_agents')
     parser.add_argument('--algo', help='RL Algorithm', default='ppo2',
-                        type=str, required=False, choices=list(ALGOS.keys()))
+                        type=str, required=False,
+                        # choices=list(utils.ALGOS.keys())
+                        )
     parser.add_argument('-n', '--n-timesteps', help='number of timesteps', default=1000,
                         type=int)
     parser.add_argument('--n-envs', help='number of environments', default=1,
@@ -194,6 +346,7 @@ def main():
                             'load_tensorrt',
                             'microbench_inference',
                             'microbench_simulator',
+                            'microbench_inference_multiprocess',
                         ],
                         default='default')
     parser.add_argument('--directory', help='output directory')
@@ -212,36 +365,48 @@ def main():
     parser.add_argument('--seed', help='Random generator seed', type=int, default=0)
     parser.add_argument('--reward-log', help='Where to log reward', default='', type=str)
     parser.add_argument('--gym-packages', type=str, nargs='+', default=[], help='Additional external Gym environemnt package modules to import (e.g. gym_minigrid)')
-    iml.add_iml_arguments(parser)
-    iml.register_wrap_module(wrap_pybullet, unwrap_pybullet)
     args, argv = parser.parse_known_args()
+
+    if args.mode not in {'microbench_inference_multiprocess'}:
+        import_all()
+        iml.add_iml_arguments(parser)
+        iml.register_wrap_module(stable_baselines_iml.wrap_pybullet, stable_baselines_iml.unwrap_pybullet)
+        args, argv = parser.parse_known_args()
 
     if args.mode == 'microbench_inference':
         subparser = argparse.ArgumentParser("Microbenchmark TensorFlow inference throughput/latency on random data.")
         subparser.add_argument('--batch-size', type=int, default=1, help="Number of random samples per minibatch")
-        subparser.add_argument('--inference-starts', type=int, default=0)
         subparser.add_argument('--warmup-iters', type=int, default=100)
         subparser_args = subparser.parse_args(argv)
-        for attr, value in vars(subparser_args).items():
-            if hasattr(args, attr):
-                raise RuntimeError("Main argument parser already has --{opt}, but {mode} subparser has conflicting --{opt}".format(
-                    opt=attr,
-                    mode=args.mode,
-                ))
-                # assert not hasattr(args, attr)
-            setattr(args, attr, value)
+        add_subparser_arguments(subparser_args, args)
+    elif args.mode == 'microbench_inference_multiprocess':
+        subparser = argparse.ArgumentParser("Microbenchmark TensorFlow inference throughput/latency on random data.")
+        subparser.add_argument('--batch-size', type=int, default=1, help="Number of random samples per minibatch")
+        subparser.add_argument('--warmup-iters', type=int, default=100)
+        subparser.add_argument('--num-tasks', type=int, required=True, help="Number of parallel processes to perform inference")
+        subparser.add_argument('--cpu', action='store_true', help="Use CPU for neural-network operators (default: GPU)")
+        subparser_args = subparser.parse_args(argv)
+        add_subparser_arguments(subparser_args, args)
 
-    trained_agent = TrainedAgent(args, parser)
-    trained_agent.run()
+    trained_agent = TrainedAgent(args)
+    try:
+        trained_agent.run()
+    except BadArgumentException as e:
+        parser.error(e.msg)
+        sys.exit(1)
+
+class BadArgumentException(RuntimeError):
+    pass
 
 class TrainedAgent:
-    def __init__(self, args, parser):
+    def __init__(self, args):
         self.args = args
-        self.parser = parser
+
+    def error(self, msg):
+        raise BadArgumentException(msg)
 
     def is_atari(self):
         args = self.args
-        parser = self.parser
         env_id = args.env
         is_atari = 'NoFrameskip' in env_id
         return is_atari
@@ -297,19 +462,8 @@ class TrainedAgent:
             'microbench_iml_clib_interception_tensorflow',
         }
 
-    def handle_iml(self, reports_progress):
-        args = self.args
-        parser = self.parser
-        iml_directory = self.get_iml_directory()
-        iml.handle_iml_args(parser, args, directory=iml_directory, reports_progress=reports_progress)
-        iml.prof.set_metadata({
-            'algo': args.algo,
-            'env': args.env,
-        })
-
     def make_env(self):
         args = self.args
-        parser = self.parser
 
         log_dir = self.log_dir()
 
@@ -326,14 +480,16 @@ class TrainedAgent:
         if algo in ['dqn', 'ddpg', 'sac']:
             args.n_envs = 1
 
-        set_global_seeds(args.seed)
+        # from stable_baselines.iml import wrap_pybullet, unwrap_pybullet
+        # from stable_baselines.common import set_global_seeds
+        stable_baselines_common.set_global_seeds(args.seed)
 
         is_atari = self.is_atari()
 
         stats_path = os.path.join(log_path, env_id)
-        hyperparams, stats_path = get_saved_hyperparams(stats_path, norm_reward=args.norm_reward, test_mode=True)
+        hyperparams, stats_path = utils.get_saved_hyperparams(stats_path, norm_reward=args.norm_reward, test_mode=True)
 
-        env = create_test_env(env_id, n_envs=args.n_envs, is_atari=is_atari,
+        env = utils.create_test_env(env_id, n_envs=args.n_envs, is_atari=is_atari,
                               stats_path=stats_path, seed=args.seed, log_dir=log_dir,
                               should_render=not args.no_render,
                               hyperparams=hyperparams)
@@ -341,14 +497,13 @@ class TrainedAgent:
 
     def log_path(self):
         args = self.args
-        parser = self.parser
 
         env_id = args.env
         algo = args.algo
         folder = args.folder
 
         if args.exp_id == 0:
-            args.exp_id = get_latest_run_id(os.path.join(folder, algo), env_id)
+            args.exp_id = utils.get_latest_run_id(os.path.join(folder, algo), env_id)
             print('Loading latest experiment, id={}'.format(args.exp_id))
 
         # Sanity checks
@@ -362,7 +517,6 @@ class TrainedAgent:
 
     def make_model(self, env):
         args = self.args
-        parser = self.parser
 
         log_path = self.log_path()
 
@@ -377,7 +531,7 @@ class TrainedAgent:
         # ACER raises errors because the environment passed must have
         # the same number of environments as the model was trained on.
         load_env = None if algo == 'acer' else env
-        model = ALGOS[algo].load(model_path, env=load_env)
+        model = utils.ALGOS[algo].load(model_path, env=load_env)
         return model
 
     def build_engine(self, uff_model_file, input_names, input_shapes, output_names, workspace_size_bytes=None):
@@ -546,11 +700,9 @@ class TrainedAgent:
 
     def mode_save_tensorrt(self):
         args = self.args
-        parser = self.parser
 
         algo = args.algo
 
-        # self.handle_iml(reports_progress=False)
         env = self.make_env()
         model = self.make_model(env)
         env_id = args.env
@@ -567,11 +719,9 @@ class TrainedAgent:
 
     def mode_load_tensorrt(self):
         args = self.args
-        parser = self.parser
 
         algo = args.algo
 
-        # self.handle_iml(reports_progress=False)
         env = self.make_env()
         model = self.make_model(env)
         env_id = args.env
@@ -596,13 +746,21 @@ class TrainedAgent:
                 })))
             self.with_trt_model(model_base, inference)
 
-    def mode_microbench_inference(self):
+    # @staticmethod
+    # def _microbench_inference_multiprocess_worker(self):
+
+    def mode_microbench_inference_multiprocess(self):
         args = self.args
-        parser = self.parser
+        expr = MicrobenchInferenceMultiprocess(trained_agent=self, args=args)
+        expr.run()
+
+    def mode_microbench_inference(self):
+        # import iml_profiler.api as iml
+        args = self.args
 
         algo = args.algo
 
-        self.handle_iml(reports_progress=True)
+        # self.handle_iml(reports_progress=True)
         env = self.make_env()
         model = self.make_model(env)
         env_id = args.env
@@ -617,10 +775,10 @@ class TrainedAgent:
         obs_space = env.observation_space
         # Q: Does observation_space already include the batch size...?
 
-        def random_minibatch(batch_size, obs_space):
-            shape = (batch_size,) + obs_space.shape
-            batch = np.random.uniform(size=shape)
-            return batch
+        # def random_minibatch(batch_size, obs_space):
+        #     shape = (batch_size,) + obs_space.shape
+        #     batch = np.random.uniform(size=shape)
+        #     return batch
 
         def is_warmed_up(t, operations_seen, operations_available):
             """
@@ -670,7 +828,7 @@ class TrainedAgent:
         iml.prof.set_max_training_loop_iters(args.n_timesteps*2, skip_if_set=False)
 
         if not iml.prof.delay:
-            parser.error("You must use --iml-delay for --mode={mode}".format(mode=args.mode))
+            self.error("You must use --iml-delay for --mode={mode}".format(mode=args.mode))
 
         with iml.prof.profile(process_name=process_name, phase_name=phase_name):
             # episode_reward = 0.0
@@ -791,10 +949,10 @@ class TrainedAgent:
 
             # Workaround for https://github.com/openai/gym/issues/893
             if not args.no_render:
-                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, VecEnv):
+                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, common_vec_env.VecEnv):
                     # DummyVecEnv
                     # Unwrap env
-                    while isinstance(env, VecNormalize) or isinstance(env, VecFrameStack):
+                    while isinstance(env, common_vec_env.VecNormalize) or isinstance(env, common_vec_env.VecFrameStack):
                         env = env.venv
                     env.envs[0].env.close()
                 else:
@@ -803,27 +961,25 @@ class TrainedAgent:
 
     def mode_microbench_simulator(self):
         args = self.args
-        parser = self.parser
 
         if args.directory is None:
-            parser.error("output --directory required for --mode={mode}".format(
+            self.error("output --directory required for --mode={mode}".format(
                 mode=args.mode,
             ))
 
         algo = args.algo
         # Q: How to ENSURE that we are running a SINGLE simulator instance (i.e., no subprocess crap)
 
-        # self.handle_iml(reports_progress=True)
         if args.n_envs != 1:
-            parser.error("For --mode={mode} you must use --n-envs=1 but saw {n_envs}".format(
+            self.error("For --mode={mode} you must use --n-envs=1 but saw {n_envs}".format(
                 n_envs=args.n_envs,
                 mode=args.mode,
             ))
         env = self.make_env()
-        assert not isinstance(env, SubprocVecEnv)
-        if isinstance(env, DummyVecEnv) or isinstance(env, VecFrameStack):
+        assert not isinstance(env, common_vec_env.SubprocVecEnv)
+        if isinstance(env, common_vec_env.DummyVecEnv) or isinstance(env, common_vec_env.VecFrameStack):
             assert len(env.envs) == 1
-        assert isinstance(env, VecEnv) and env.num_envs == 1
+        assert isinstance(env, common_vec_env.VecEnv) and env.num_envs == 1
         # model = self.make_model()
         env_id = args.env
 
@@ -899,10 +1055,10 @@ class TrainedAgent:
 
         # Workaround for https://github.com/openai/gym/issues/893
         if not args.no_render:
-            if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, VecEnv):
+            if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, common_vec_env.VecEnv):
                 # DummyVecEnv
                 # Unwrap env
-                while isinstance(env, VecNormalize) or isinstance(env, VecFrameStack):
+                while isinstance(env, common_vec_env.VecNormalize) or isinstance(env, common_vec_env.VecFrameStack):
                     env = env.venv
                 env.envs[0].env.close()
             else:
@@ -912,11 +1068,10 @@ class TrainedAgent:
 
     def mode_default(self):
         args = self.args
-        parser = self.parser
 
         algo = args.algo
 
-        self.handle_iml(reports_progress=False)
+        # self.handle_iml(reports_progress=False)
         env = self.make_env()
         model = self.make_model(env)
         env_id = args.env
@@ -990,10 +1145,10 @@ class TrainedAgent:
 
             # Workaround for https://github.com/openai/gym/issues/893
             if not args.no_render:
-                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, VecEnv):
+                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, common_vec_env.VecEnv):
                     # DummyVecEnv
                     # Unwrap env
-                    while isinstance(env, VecNormalize) or isinstance(env, VecFrameStack):
+                    while isinstance(env, common_vec_env.VecNormalize) or isinstance(env, common_vec_env.VecFrameStack):
                         env = env.venv
                     env.envs[0].env.close()
                 else:
@@ -1002,7 +1157,6 @@ class TrainedAgent:
 
     def deterministic(self):
         args = self.args
-        parser = self.parser
         algo = args.algo
         # Force deterministic for DQN, DDPG, SAC and HER (that is a wrapper around)
         deterministic = args.deterministic or algo in ['dqn', 'ddpg', 'sac', 'her'] and not args.stochastic
@@ -1010,9 +1164,8 @@ class TrainedAgent:
 
     def mode_microbench_iml_python_annotation(self):
         args = self.args
-        parser = self.parser
 
-        self.handle_iml(reports_progress=True)
+        # self.handle_iml(reports_progress=True)
 
         process_name = get_process_name(args)
         phase_name = process_name
@@ -1055,11 +1208,10 @@ class TrainedAgent:
 
     def mode_microbench_iml_clib_interception_simulator(self):
         args = self.args
-        parser = self.parser
 
         algo = args.algo
 
-        self.handle_iml(reports_progress=True)
+        # self.handle_iml(reports_progress=True)
         env = self.make_env()
         # model = self.make_model()
         env_id = args.env
@@ -1126,10 +1278,10 @@ class TrainedAgent:
 
             # Workaround for https://github.com/openai/gym/issues/893
             if not args.no_render:
-                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, VecEnv):
+                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, common_vec_env.VecEnv):
                     # DummyVecEnv
                     # Unwrap env
-                    while isinstance(env, VecNormalize) or isinstance(env, VecFrameStack):
+                    while isinstance(env, common_vec_env.VecNormalize) or isinstance(env, common_vec_env.VecFrameStack):
                         env = env.venv
                     env.envs[0].env.close()
                 else:
@@ -1138,11 +1290,10 @@ class TrainedAgent:
 
     def mode_microbench_iml_clib_interception_tensorflow(self):
         args = self.args
-        parser = self.parser
 
         algo = args.algo
 
-        self.handle_iml(reports_progress=True)
+        # self.handle_iml(reports_progress=True)
         env = self.make_env()
         model = self.make_model(env)
         env_id = args.env
@@ -1209,10 +1360,10 @@ class TrainedAgent:
 
             # Workaround for https://github.com/openai/gym/issues/893
             if not args.no_render:
-                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, VecEnv):
+                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, common_vec_env.VecEnv):
                     # DummyVecEnv
                     # Unwrap env
-                    while isinstance(env, VecNormalize) or isinstance(env, VecFrameStack):
+                    while isinstance(env, common_vec_env.VecNormalize) or isinstance(env, common_vec_env.VecFrameStack):
                         env = env.venv
                     env.envs[0].env.close()
                 else:
@@ -1221,32 +1372,34 @@ class TrainedAgent:
 
     def run(self):
         args = self.args
-        parser = self.parser
 
         if args.mode == 'default':
+            handle_iml(trained_agent=self, reports_progress=False)
             self.mode_default()
         elif args.mode == 'microbench_iml_python_annotation':
+            handle_iml(trained_agent=self, reports_progress=True)
             self.mode_microbench_iml_python_annotation()
         elif args.mode == 'microbench_iml_clib_interception_simulator':
+            handle_iml(trained_agent=self, reports_progress=True)
             self.mode_microbench_iml_clib_interception_simulator()
         elif args.mode == 'microbench_iml_clib_interception_tensorflow':
+            handle_iml(trained_agent=self, reports_progress=True)
             self.mode_microbench_iml_clib_interception_tensorflow()
         elif args.mode == 'save_tensorrt':
             self.mode_save_tensorrt()
         elif args.mode == 'load_tensorrt':
             self.mode_load_tensorrt()
         elif args.mode == 'microbench_inference':
+            handle_iml(trained_agent=self, reports_progress=True)
             self.mode_microbench_inference()
         elif args.mode == 'microbench_simulator':
-            self.mode_microbench_simulator()
+           self.mode_microbench_simulator()
+        elif args.mode == 'microbench_inference_multiprocess':
+            self.mode_microbench_inference_multiprocess()
         else:
             raise NotImplementedError("Note sure how to run --mode={mode}".format(
                 mode=args.mode))
 
-
-# You can set the logger severity higher to suppress messages (or lower to display more messages).
-# TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE)
 
 class ModelData(object):
     MODEL_FILE = "lenet5.uff"
@@ -1374,6 +1527,381 @@ def setup_logging():
     format = 'PID={process}/{processName} @ {funcName}, {filename}:{lineno} :: {asctime} {levelname}: {message}'
     logging.basicConfig(format=format, style='{')
     logger.setLevel(logging.INFO)
+
+def random_minibatch(batch_size, obs_space):
+    shape = (batch_size,) + obs_space.shape
+    batch = np.random.uniform(size=shape)
+    return batch
+
+class MicrobenchInferenceMultiprocess:
+    def __init__(self, trained_agent, args):
+        self.trained_agent = trained_agent
+        self.args = args
+        # self.failed = None
+        self.failed = multiprocessing.Event()
+
+    def run(self):
+        args = self.args
+
+        if args.directory is None:
+            self.error("output --directory required for --mode={mode}".format(
+                mode=args.mode,
+            ))
+
+        if args.warmup_iters > args.n_timesteps is None:
+            self.error("--warmup-iters={warmup_iters} must be less than --n-timesteps={n_timesteps}".format(
+                warmup_iters=args.warmup_iters,
+                n_timesteps=args.n_timesteps,
+            ))
+
+        # procs = []
+        # js_paths = []
+        # start_t = None
+        # end_t = None
+
+        # WARNING: this approach DEADLOCKS.  It has something to do with multiprocessing.Barrier not
+        # being pickled to processes properly (results in a deadlock).  Interestingly it works just fine
+        # with multiprocess.Process.
+        #
+        # def with_pool():
+        #     with ProcessPoolExecutor(max_workers=self.num_tasks) as pool:
+        #         results = []
+        #
+        #         for task_id in range(self.num_tasks):
+        #             logger.info(self.log_msg(f"Launch child task_id={task_id}"))
+        #             future = pool.submit(MicrobenchInferenceMultiprocess._worker, self, task_id)
+        #             results.append(future)
+        #
+        #         # Wait for warmup period in each worker.
+        #         logger.info(self.log_msg(f"Await start of inference in parent..."))
+        #         # PROBLEM: exceptions BEFORE barrier won't be seen in parent, since they get raised
+        #         # when calling future.result().
+        #         self.barrier.wait()
+        #         logger.info(self.log_msg(f"Start inference in parent..."))
+        #
+        #         start_t = time.time()
+        #
+        #         # Wait for all the processes to finish writing their json files.
+        #         logger.info(self.log_msg(f"Await end of inference in parent..."))
+        #         for future in futures.as_completed(results):
+        #             # NOTE: this SHOULD raise an exception upon failure...
+        #             js_path = future.result()
+        #             js_paths.append(js_path)
+        #
+        #         end_t = time.time()
+        #         logger.info(self.log_msg(f"Saw end of inference in parent (took {end_t - start_t} sec)"))
+        #
+        #         return start_t, end_t, js_paths
+
+        def with_Process():
+            if 'tensorflow' in sys.modules.keys():
+                logger.info("Python modules loaded BEFORE forking children:\n{modules}".format(
+                    modules=textwrap.indent(pprint.pformat(sorted(sys.modules.keys())), prefix='  '),
+                ))
+                assert 'tensorflow' not in sys.modules.keys()
+            if self.num_tasks > 1:
+                # +1 for parent thread.
+                self.barrier = multiprocessing.Barrier(self.num_tasks + 1)
+
+                procs = []
+                for task_id in range(self.num_tasks):
+                    logger.info(self.log_msg(f"Launch child task_id={task_id}"))
+                    proc = multiprocessing.Process(target=MicrobenchInferenceMultiprocess._worker, args=(self, task_id))
+                    proc.start()
+                    procs.append(proc)
+
+                # Wait for warmup period in each worker.
+                logger.info(self.log_msg(f"Await start of inference in parent..."))
+                failed = False
+                try:
+                    self.barrier.wait()
+                    # self.barrier.wait(timeout=2)
+                except threading.BrokenBarrierError as e:
+                    # self.error(f"Parent saw broken barrier from at least one failed child", exitcode=1, exception=e)
+                    logging.error(f"Parent saw broken barrier from at least one failed child; waiting for children")
+                    for proc in procs:
+                        proc.join()
+                    failed = True
+                if failed:
+                    logging.error(f"Exit parent with exitcode=1")
+                    sys.exit(1)
+                logger.info(self.log_msg(f"Start inference in parent..."))
+
+                start_t = time.time()
+
+                # Wait for all the processes to finish writing their json files.
+                # TODO: poll on processes; if at least one fails with bad exit code, then check "failed" condition.
+                # (Wait for all processes to finish)
+
+                # finished_procs = []
+                # alive_procs = list(enumerate(procs))
+                # while len(alive_procs) > 0:
+                #     i = 0
+                #     while i < len(alive_procs):
+                #         task_id, proc = alive_procs[i]
+                #         if not proc.is_alive():
+                #             # finished_proc = alive_procs[i]
+                #             del alive_procs[i]
+                #             assert proc.exitcode is not None
+                #             if proc.exitcode < 0:
+                #                 self.error(f"Parent saw failed task_id={task_id}")
+                #             finished_procs.append((task_id, proc))
+                #         else:
+                #             i += 1
+                #     time.sleep(2)
+
+                logger.info(self.log_msg(f"Await end of inference in parent..."))
+                for task_id, proc in enumerate(procs):
+                    proc.join()
+                    assert proc.exitcode is not None
+                    if proc.exitcode < 0:
+                        self.error(f"Parent saw failed task_id={task_id}")
+                    # js_path = future.result()
+                    # js_paths.append(js_path)
+
+                end_t = time.time()
+                logger.info(self.log_msg(f"Saw end of inference in parent (took {end_t - start_t} sec)"))
+
+            else:
+                self.barrier = None
+                assert self.num_tasks == 1
+                self.worker(task_id=0)
+                start_t = self.single_process_start_t
+                end_t = self.single_process_end_t
+                # end_t = time.time()
+
+            js_paths = [path for path in each_file_recursive(args.directory) \
+                        if re.search(r'^mode_microbench_inference_multiprocess.task_id_\d+.json$', _b(path))]
+
+            return start_t, end_t, js_paths
+
+        # js_paths = with_pool()
+        start_t, end_t, js_paths = with_Process()
+        logger.info(self.log_msg("Parent saw result from children:\n{paths}".format(
+            paths=textwrap.indent(pprint.pformat(js_paths), prefix='  '),
+        )))
+        assert len(js_paths) > 0
+
+        # Compute:
+        # - throughput (overall across all processes)
+        #   - inference_time_sec = concat inference_js['raw_samples']['inference_time_sec'] from all processes
+        #   - total_time_sec     = end_t - start_t
+        # - latency samples (mean/std over all processes)
+        #   - inference_time_sec = concat inference_js['raw_samples']['inference_time_sec'] from all processes
+        #   - compute mean/std
+        total_time_sec = end_t - start_t
+        js_datas = [load_json(path) for path in js_paths]
+        inference_time_sec = np.array(list(itertools.chain.from_iterable(js['raw_samples']['inference_time_sec'] for js in js_datas)))
+        total_samples = len(inference_time_sec)*args.batch_size
+        throughput_qps = total_samples / total_time_sec
+        inference_js = dict()
+        inference_js['raw_samples'] = dict()
+        inference_js['summary_metrics'] = dict()
+        inference_js['raw_samples']['inference_time_sec'] = inference_time_sec.tolist()
+        inference_js['summary_metrics']['throughput_qps'] = throughput_qps
+        inference_js['summary_metrics']['total_samples'] = total_samples
+        inference_js['summary_metrics']['batch_size'] = args.batch_size
+        inference_js['summary_metrics']['total_time_sec'] = total_time_sec
+        inference_js['summary_metrics']['mean_inference_time_sec'] = inference_time_sec.mean()
+        inference_js['summary_metrics']['std_inference_time_sec'] = inference_time_sec.std()
+        inference_js['summary_metrics']['inference_time_percentile_99_sec'] = np.percentile(inference_time_sec, 0.99)
+        js_path = _j(args.directory, 'mode_microbench_inference_multiprocess.merged.json')
+        logger.info(self.log_msg("Dump {path}".format(path=js_path)))
+        do_dump_json(inference_js, js_path)
+
+    # def _worker(self, *args, **kwargs):
+    @staticmethod
+    def _worker(self, task_id):
+        try:
+            # print(f"HELLO WORLD from task_id={task_id}")
+            # logger.info(f"Start worker task_id={task_id}")
+            # return self.worker(*args, **kwargs)
+            return self.worker(task_id)
+        except Exception as e:
+            self.failed.set()
+            self.barrier.abort()
+            tb = traceback.format_exc()
+            logger.info("Saw exception in task_id={task_id}:\n{msg}".format(
+                task_id=task_id,
+                msg=textwrap.indent(str(tb), prefix='  ')
+            ))
+            raise e
+
+    # def _fake_worker(task_id):
+    @staticmethod
+    def _fake_worker(self, task_id):
+        print(f"HELLO WORLD from task_id={task_id}")
+        return task_id
+        # raise RuntimeError(f"error from task_id={task_id}")
+
+    def worker(self, task_id):
+        # import_trt()
+        import_tensorflow()
+        assert tf is not None
+        # import_all()
+        def _run():
+            args = self.args
+            algo = args.algo
+            trained_agent = self.trained_agent
+
+            env = trained_agent.make_env()
+            model = trained_agent.make_model(env)
+            env_id = args.env
+
+            is_atari = trained_agent.is_atari()
+
+            obs = env.reset()
+
+            # Force deterministic for DQN, DDPG, SAC and HER (that is a wrapper around)
+            deterministic = args.deterministic or algo in ['dqn', 'ddpg', 'sac', 'her'] and not args.stochastic
+
+            obs_space = env.observation_space
+
+            def is_warmed_up(t):
+                return t > args.warmup_iters
+
+            process_name = get_process_name(args)
+            phase_name = process_name
+            random_obs = random_minibatch(args.batch_size, obs_space)
+            logger.info(self.log_msg("using --batch-size={batch} => {shape}".format(
+                batch=args.batch_size,
+                shape=random_obs.shape,
+            )))
+
+            warmed_up = False
+            inference_time_sec = []
+            for t in range(args.n_timesteps):
+
+                if not warmed_up and is_warmed_up(t):
+                    # Entire training loop is now running; enable IML tracing
+                    start_t = time.time()
+                    start_timesteps = t
+                    if self.barrier is not None:
+                        logger.info(self.log_msg(f"Await inference in thread={task_id}..."))
+                        self.barrier.wait()
+                        logger.info(self.log_msg(f"Start inference in thread={task_id}"))
+                    else:
+                        pass
+                        logger.info(self.log_msg(f"Running inference in single-process mode in thread={task_id}"))
+                    warmed_up = True
+
+                start_inference_t = time.time()
+                action, _ = model.predict(random_obs, deterministic=deterministic)
+                end_inference_t = time.time()
+                if warmed_up:
+                    inf_time_sec = end_inference_t - start_inference_t
+                    inference_time_sec.append(inf_time_sec)
+
+            end_t = time.time()
+
+            if self.num_tasks == 1:
+                self.single_process_start_t = start_t
+                self.single_process_end_t = end_t
+
+            inference_time_sec = np.array(inference_time_sec)
+            # total_time_sec = (end_t - start_t)
+            total_time_sec = np.sum(inference_time_sec)
+            # total_samples = (args.n_timesteps - start_timesteps)*args.batch_size
+            total_samples = len(inference_time_sec)*args.batch_size
+            throughput_qps = total_samples / total_time_sec
+            inference_js = dict()
+            inference_js['raw_samples'] = dict()
+            inference_js['summary_metrics'] = dict()
+            inference_js['raw_samples']['inference_time_sec'] = inference_time_sec.tolist()
+            inference_js['summary_metrics']['throughput_qps'] = throughput_qps
+            inference_js['summary_metrics']['total_samples'] = total_samples
+            inference_js['summary_metrics']['batch_size'] = args.batch_size
+            inference_js['summary_metrics']['total_time_sec'] = total_time_sec
+            inference_js['summary_metrics']['mean_inference_time_sec'] = inference_time_sec.mean()
+            inference_js['summary_metrics']['std_inference_time_sec'] = inference_time_sec.std()
+            inference_js['summary_metrics']['inference_time_percentile_99_sec'] = np.percentile(inference_time_sec, 0.99)
+            js_path = _j(args.directory, f"mode_microbench_inference_multiprocess.task_id_{task_id}.json")
+            do_dump_json(inference_js, js_path)
+
+            # Workaround for https://github.com/openai/gym/issues/893
+            if not args.no_render:
+                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, common_vec_env.VecEnv):
+                    # DummyVecEnv
+                    # Unwrap env
+                    while isinstance(env, common_vec_env.VecNormalize) or isinstance(env, common_vec_env.VecFrameStack):
+                        env = env.venv
+                    env.envs[0].env.close()
+                else:
+                    # SubprocVecEnv
+                    env.close()
+
+            return js_path
+
+        logger.info(f"Start worker task_id={task_id}")
+        do_with_device(self.args, _run)
+
+    @property
+    def num_tasks(self):
+        return self.args.num_tasks
+
+    def error(self, msg, exitcode=None, exception=None):
+        if exitcode is not None:
+            if exception is not None:
+                tb = traceback.format_exc()
+                logger.error("Saw exception:\n{msg}".format(
+                    msg=textwrap.indent(str(tb), prefix='  ')
+                ))
+            logger.error(msg)
+            logger.error(f"Exit parent with exitcode={exitcode}")
+            sys.exit(exitcode)
+        if exception is None:
+            exception = RuntimeError(msg)
+        raise exception
+
+    def log_msg(self, msg):
+        return log_msg('INFER', msg)
+
+def each_file_recursive(root_dir):
+    if not os.path.isdir(root_dir):
+        raise ValueError("No such directory {root_dir}".format(root_dir=root_dir))
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        for base in filenames:
+            path = _j(dirpath, base)
+            yield path
+
+def handle_iml(trained_agent, reports_progress):
+    import iml_profiler.api as iml
+    args = trained_agent.args
+    parser = trained_agent.parser
+    iml_directory = trained_agent.get_iml_directory()
+    iml.handle_iml_args(parser, args, directory=iml_directory, reports_progress=reports_progress)
+    iml.prof.set_metadata({
+        'algo': args.algo,
+        'env': args.env,
+    })
+
+def do_with_device(args, func):
+    devices = tf.config.experimental.list_physical_devices()
+    logger.info("Available devices:\n{devs}".format(
+        devs=textwrap.indent(pprint.pformat(devices), prefix='  '),
+    ))
+    cpu_devices = tf.config.experimental.list_physical_devices('CPU')
+    gpu_devices = tf.config.experimental.list_physical_devices('GPU')
+
+    if args.cpu:
+        if len(cpu_devices) < 1:
+            raise RuntimeError("Couldn't allocate CPU since none are available; devices available are:\n{devs}".format(
+                devs=textwrap.indent(pprint.pformat(devices), prefix='  '),
+            ))
+        device = cpu_devices[0]
+    else:
+        if len(gpu_devices) < 1:
+            raise RuntimeError("Couldn't allocate GPU since none are available; devices available are:\n{devs}".format(
+                devs=textwrap.indent(pprint.pformat(devices), prefix='  '),
+            ))
+        device = gpu_devices[0]
+
+    logger.info(f"Running with device={device}")
+    device_name = re.sub(r'physical_device', 'device', device.name)
+    # device_name = "/device:GPU:0"
+    with tf.device(device_name):
+        func()
+
 
 if __name__ == '__main__':
     main()
