@@ -23,6 +23,7 @@ import textwrap
 import re
 import multiprocessing
 import threading
+import numpy as np
 from concurrent.futures.process import ProcessPoolExecutor
 from concurrent.futures.thread import ThreadPoolExecutor
 from concurrent import futures
@@ -70,16 +71,18 @@ from os.path import join as _j, abspath as _a, exists as _e, dirname as _d, base
 
 # For pybullet envs
 warnings.filterwarnings("ignore")
-import gym
-try:
-    import pybullet_envs
-except ImportError:
-    pybullet_envs = None
-import numpy as np
-try:
-    import highway_env
-except ImportError:
-    highway_env = None
+# pybullet_envs = None
+# highway_env = None
+# gym = None
+# import gym
+# try:
+#     import pybullet_envs
+# except ImportError:
+#     pybullet_envs = None
+# try:
+#     import highway_env
+# except ImportError:
+#     highway_env = None
 
 # import stable_baselines
 # from stable_baselines.common import set_global_seeds
@@ -123,11 +126,18 @@ def init_tensorflow():
 tf = None
 stable_baselines = None
 stable_baselines_common = None
+stable_baselines_common_tf_util = None
 common_vec_env = None
 utils = None
 stable_baselines_iml = None
 iml = None
+pybullet_envs = None
+highway_env = None
+gym = None
+
 import_tensorflow_LOADED = False
+
+
 def import_tensorflow():
     global import_tensorflow_LOADED
     if import_tensorflow_LOADED:
@@ -136,21 +146,36 @@ def import_tensorflow():
     global tf
     global stable_baselines
     global stable_baselines_common
+    global stable_baselines_common_tf_util
     global common_vec_env
     global utils
     global stable_baselines_iml
     global iml
+    global pybullet_envs
+    global highway_env
+    global gym
 
     import tensorflow as tf
     init_tensorflow()
 
     import stable_baselines
     import stable_baselines.common as stable_baselines_common
+    import stable_baselines.common.tf_util as stable_baselines_common_tf_util
     # from stable_baselines.common.vec_env import VecNormalize, VecFrameStack, VecEnv
     import stable_baselines.common.vec_env as common_vec_env
     import utils
     import stable_baselines.iml as stable_baselines_iml
     import iml_profiler.api as iml
+    import gym
+    try:
+        import pybullet_envs
+    except ImportError:
+        pybullet_envs = None
+    import numpy as np
+    try:
+        import highway_env
+    except ImportError:
+        highway_env = None
 
     # Fix for breaking change in v2.6.0
     if pkg_resources.get_distribution("stable_baselines").version >= "2.6.0":
@@ -344,6 +369,7 @@ def main():
                             'microbench_iml_clib_interception_tensorflow',
                             'save_tensorrt',
                             'load_tensorrt',
+                            'convert_trt',
                             'microbench_inference',
                             'microbench_simulator',
                             'microbench_inference_multiprocess',
@@ -369,9 +395,10 @@ def main():
 
     if args.mode not in {'microbench_inference_multiprocess'}:
         import_all()
-        iml.add_iml_arguments(parser)
-        iml.register_wrap_module(stable_baselines_iml.wrap_pybullet, stable_baselines_iml.unwrap_pybullet)
-        args, argv = parser.parse_known_args()
+        if args.mode not in {'convert_trt'}:
+            iml.add_iml_arguments(parser)
+            iml.register_wrap_module(stable_baselines_iml.wrap_pybullet, stable_baselines_iml.unwrap_pybullet)
+            args, argv = parser.parse_known_args()
 
     if args.mode == 'microbench_inference':
         subparser = argparse.ArgumentParser("Microbenchmark TensorFlow inference throughput/latency on random data.")
@@ -385,6 +412,15 @@ def main():
         subparser.add_argument('--warmup-iters', type=int, default=100)
         subparser.add_argument('--num-tasks', type=int, required=True, help="Number of parallel processes to perform inference")
         subparser.add_argument('--cpu', action='store_true', help="Use CPU for neural-network operators (default: GPU)")
+        subparser.add_argument('--graph-def-pb', help="File containing serialized TensorFlow GraphDef protobuf; --algo and --env are ignored in this case (i.e., not used to lookup algorithm and environment)")
+        subparser_args = subparser.parse_args(argv)
+        add_subparser_arguments(subparser_args, args)
+    elif args.mode == 'convert_trt':
+        subparser = argparse.ArgumentParser("Convert TensorFlow GraphDef to TensorRT model.")
+        subparser.add_argument('--trt-precision', required=True, choices=['fp32', 'fp16', 'int8'], help="Precision")
+        subparser.add_argument('--trt-max-batch-size', required=True, type=int, help="Max batch size for profiling")
+        subparser.add_argument('--graph-def-pb', help="File containing serialized TensorFlow GraphDef protobuf; --algo and --env are ignored in this case (i.e., not used to lookup algorithm and environment)")
+        subparser.add_argument('--saved-model-dir', help="Directory containing serialized TensorFlow SavedModel")
         subparser_args = subparser.parse_args(argv)
         add_subparser_arguments(subparser_args, args)
 
@@ -697,6 +733,83 @@ class TrainedAgent:
             for node in inputs:
                 f.write(node.name)
                 f.write("\n")
+
+    def mode_convert_trt(self):
+        # from tensorflow.core.framework.graph_pb2 import GraphDef
+
+        args = self.args
+
+        def _output_trt_graph(trt,
+                              sess, graph_def, output_names, trt_model_path,
+                              trt_max_batch_size=8,
+                              trt_precision='fp32'):
+            assert trt_max_batch_size is not None
+            # This is causing memory corruption...
+            trt_out_graph = trt.create_inference_graph(
+                input_graph_def=graph_def,
+                outputs=output_names,
+                max_batch_size=trt_max_batch_size,
+                max_workspace_size_bytes=1 << 29,
+                precision_mode=trt_precision)
+            save_tensorflow_graph(sess, trt_out_graph, output_names, trt_model_path)
+            logger.info("EXIT")
+            sys.exit(0)
+            # converter = trt.TrtGraphConverterV2(input_saved_model_dir=input_saved_model_dir)
+            # converter.convert()
+            # converter.save(output_saved_model_dir)
+
+        def tfv1_output_trt_graph(sess, graph_def, output_names, trt_model_path,
+                             trt_max_batch_size=8,
+                             trt_precision='fp32'):
+            import tensorflow.contrib.tensorrt as trt
+            _output_trt_graph(trt,
+                              sess, graph_def, output_names, trt_model_path,
+                              trt_max_batch_size=trt_max_batch_size,
+                              trt_precision=trt_precision,
+                              )
+
+        def tfv2_output_trt_graph(sess, graph_def, output_names, trt_model_path,
+                trt_max_batch_size=8,
+                trt_precision='fp32'):
+            from tensorflow.python.compiler.tensorrt import trt_convert as trt
+            _output_trt_graph(trt,
+                              sess, graph_def, output_names, trt_model_path,
+                              trt_max_batch_size=trt_max_batch_size,
+                              trt_precision=trt_precision,
+                              )
+
+        def model_name(path):
+            base = _b(path)
+            name = base
+            name = re.sub('\.pb$', '', name)
+            name = re.sub('\.', '-', name)
+            return name
+
+        def trt_model_path(pb_path):
+            base = "{name}.trt_precision_{prec}.trt_max_batch_size_{max_batch}.pb".format(
+                name=model_name(pb_path),
+                max_batch=args.trt_max_batch_size,
+                prec=args.trt_precision,
+            )
+            return _j(_d(pb_path), base)
+
+        if args.graph_def_pb is not None:
+            graph = load_graph(args.graph_def_pb)
+            graph_ctx = graph.as_default()
+            graph_ctx.__enter__()
+            self.sess = stable_baselines_common_tf_util.single_threaded_session(graph=graph)
+
+            inputs, outputs = analyze_inputs_outputs(graph)
+            output_names = [out.name for out in outputs]
+
+            tfv2_output_trt_graph(
+                self.sess, graph.as_graph_def(), output_names, trt_model_path(args.graph_def_pb),
+                trt_max_batch_size=args.trt_max_batch_size,
+                trt_precision=args.trt_precision)
+        else:
+            self.sess = stable_baselines_common_tf_util.single_threaded_session(graph=None)
+            ret = load_saved_model(self.sess, args.saved_model_dir)
+            import ipdb; ipdb.set_trace()
 
     def mode_save_tensorrt(self):
         args = self.args
@@ -1387,6 +1500,8 @@ class TrainedAgent:
             self.mode_microbench_iml_clib_interception_tensorflow()
         elif args.mode == 'save_tensorrt':
             self.mode_save_tensorrt()
+        elif args.mode == 'convert_trt':
+            self.mode_convert_trt()
         elif args.mode == 'load_tensorrt':
             self.mode_load_tensorrt()
         elif args.mode == 'microbench_inference':
@@ -1528,10 +1643,200 @@ def setup_logging():
     logging.basicConfig(format=format, style='{')
     logger.setLevel(logging.INFO)
 
-def random_minibatch(batch_size, obs_space):
-    shape = (batch_size,) + obs_space.shape
+def random_minibatch(batch_size, obs_space=None, shape=None):
+    if shape is None:
+        shape = obs_space.shape
+    shape = (batch_size,) + tuple(shape)
     batch = np.random.uniform(size=shape)
     return batch
+
+
+class BaseInferenceWorker:
+    def __init__(self, expr, task_id):
+        self.expr = expr
+        self.task_id = task_id
+
+    def infer_minibatch(self):
+        raise NotImplementedError()
+
+    def deinit(self):
+        pass
+
+    def run(self):
+        args = self.expr.args
+        task_id = self.task_id
+        logger.info(f"Start worker task_id={task_id}")
+        do_with_device(args, self._run)
+
+    def _run(self):
+        args = self.expr.args
+        expr = self.expr
+        task_id = self.task_id
+        def is_warmed_up(t):
+            return t > args.warmup_iters
+
+        warmed_up = False
+        inference_time_sec = []
+        for t in range(args.n_timesteps):
+
+            if not warmed_up and is_warmed_up(t):
+                # Entire training loop is now running; enable IML tracing
+                start_t = time.time()
+                start_timesteps = t
+                if expr.barrier is not None:
+                    logger.info(expr.log_msg(f"Await inference in thread={task_id}..."))
+                    expr.barrier.wait()
+                    logger.info(expr.log_msg(f"Start inference in thread={task_id}"))
+                else:
+                    pass
+                    logger.info(expr.log_msg(f"Running inference in single-process mode in thread={task_id}"))
+                warmed_up = True
+
+            start_inference_t = time.time()
+            output = self.infer_minibatch()
+            # action, _ = model.predict(random_obs, deterministic=deterministic)
+            end_inference_t = time.time()
+            if warmed_up:
+                inf_time_sec = end_inference_t - start_inference_t
+                inference_time_sec.append(inf_time_sec)
+
+        end_t = time.time()
+
+        if expr.num_tasks == 1:
+            expr.single_process_start_t = start_t
+            expr.single_process_end_t = end_t
+
+        inference_time_sec = np.array(inference_time_sec)
+        # total_time_sec = (end_t - start_t)
+        total_time_sec = np.sum(inference_time_sec)
+        # total_samples = (args.n_timesteps - start_timesteps)*args.batch_size
+        total_samples = len(inference_time_sec)*args.batch_size
+        throughput_qps = total_samples / total_time_sec
+        inference_js = dict()
+        # Q: Should difference InferenceWorker's add extra fields...?
+        inference_js['raw_samples'] = dict()
+        inference_js['summary_metrics'] = dict()
+        inference_js['raw_samples']['inference_time_sec'] = inference_time_sec.tolist()
+        inference_js['summary_metrics']['throughput_qps'] = throughput_qps
+        inference_js['summary_metrics']['total_samples'] = total_samples
+        inference_js['summary_metrics']['batch_size'] = args.batch_size
+        inference_js['summary_metrics']['total_time_sec'] = total_time_sec
+        inference_js['summary_metrics']['mean_inference_time_sec'] = inference_time_sec.mean()
+        inference_js['summary_metrics']['std_inference_time_sec'] = inference_time_sec.std()
+        inference_js['summary_metrics']['inference_time_percentile_99_sec'] = np.percentile(inference_time_sec, 0.99)
+        js_path = _j(args.directory, f"mode_microbench_inference_multiprocess.task_id_{task_id}.json")
+        do_dump_json(inference_js, js_path)
+        self.deinit()
+        return js_path
+
+
+class StableBaselinesInferenceWorker(BaseInferenceWorker):
+    def __init__(self, expr, task_id):
+        super().__init__(expr, task_id)
+
+        expr = self.expr
+        args = expr.args
+        algo = args.algo
+        trained_agent = expr.trained_agent
+
+        self.env = trained_agent.make_env()
+        self.model = trained_agent.make_model(self.env)
+        self.env_id = args.env
+
+        self.is_atari = trained_agent.is_atari()
+
+        obs = self.env.reset()
+
+        # Force deterministic for DQN, DDPG, SAC and HER (that is a wrapper around)
+        self.deterministic = args.deterministic or algo in ['dqn', 'ddpg', 'sac', 'her'] and not args.stochastic
+
+        obs_space = self.env.observation_space
+
+        process_name = get_process_name(args)
+        phase_name = process_name
+        self.random_obs = random_minibatch(args.batch_size, obs_space)
+        logger.info(expr.log_msg("using --batch-size={batch} => {shape}".format(
+            batch=args.batch_size,
+            shape=self.random_obs.shape,
+        )))
+
+    def infer_minibatch(self):
+        action, _ = self.model.predict(self.random_obs, deterministic=self.deterministic)
+        return action
+
+    def deinit(self):
+        args = self.expr.args
+        # Workaround for https://github.com/openai/gym/issues/893
+        if not args.no_render:
+            if args.n_envs == 1 and 'Bullet' not in self.env_id and not self.is_atari and isinstance(self.env, common_vec_env.VecEnv):
+                # DummyVecEnv
+                # Unwrap env
+                while isinstance(self.env, common_vec_env.VecNormalize) or isinstance(self.env, common_vec_env.VecFrameStack):
+                    self.env = self.env.venv
+                self.env.envs[0].env.close()
+            else:
+                # SubprocVecEnv
+                self.env.close()
+
+
+class GraphDefInferenceWorker(BaseInferenceWorker):
+    def __init__(self, expr, task_id):
+        super().__init__(expr, task_id)
+
+        expr = self.expr
+        args = expr.args
+
+        # TODO: read tensorflow graph from --graph-def-pb, lookup input nodes and shape,
+        # create random numpy observation of matching shape (with first -1 dimension
+        # replaced with args.batch_size).
+
+        assert args.graph_def_pb is not None
+        self.graph = load_graph(args.graph_def_pb)
+        self.inputs, self.outputs = analyze_inputs_outputs(self.graph)
+
+        # assert len(self.inputs) == 1
+        self.random_inputs = []
+        self.input_placeholders = []
+        self.feed_dict = dict()
+        for i, inp in enumerate(self.inputs):
+            shape = operation_shape(inp)
+            logger.info(f"Generate random input {i}: batch_size={args.batch_size} shape={shape}")
+            # tf.placeholder(np.float32, shape = [None, 32, 32, 3], name='input')
+            random_input = random_minibatch(args.batch_size, shape=shape)
+            assert len(inp.values()) == 1
+            placeholder = inp.values()[0]
+            self.random_inputs.append(random_input)
+            self.feed_dict[placeholder] = random_input
+
+        # with self.graph.as_default():
+        #     self.sess = tf_util.single_threaded_session(graph=self.graph)
+
+        self.graph_ctx = self.graph.as_default()
+        self.graph_ctx.__enter__()
+        self.sess = stable_baselines_common_tf_util.single_threaded_session(graph=self.graph)
+
+        # self.sess = tf.compat.v1.get_default_session()
+        assert self.sess is not None
+
+        # import ipdb; ipdb.set_trace()
+
+        # with self.graph.as_default():
+        #     self.sess = tf_util.single_threaded_session(graph=self.graph)
+
+
+        # logger.info(expr.log_msg("using --batch-size={batch} => {shape}".format(
+        #     batch=args.batch_size,
+        #     shape=self.random_obs.shape,
+        # )))
+
+
+    def infer_minibatch(self):
+        outputs = self.sess.run(self.outputs, feed_dict=self.feed_dict)
+        return outputs
+
+    def deinit(self):
+        self.graph_ctx.__exit__()
+
 
 class MicrobenchInferenceMultiprocess:
     def __init__(self, trained_agent, args):
@@ -1553,45 +1858,6 @@ class MicrobenchInferenceMultiprocess:
                 warmup_iters=args.warmup_iters,
                 n_timesteps=args.n_timesteps,
             ))
-
-        # procs = []
-        # js_paths = []
-        # start_t = None
-        # end_t = None
-
-        # WARNING: this approach DEADLOCKS.  It has something to do with multiprocessing.Barrier not
-        # being pickled to processes properly (results in a deadlock).  Interestingly it works just fine
-        # with multiprocess.Process.
-        #
-        # def with_pool():
-        #     with ProcessPoolExecutor(max_workers=self.num_tasks) as pool:
-        #         results = []
-        #
-        #         for task_id in range(self.num_tasks):
-        #             logger.info(self.log_msg(f"Launch child task_id={task_id}"))
-        #             future = pool.submit(MicrobenchInferenceMultiprocess._worker, self, task_id)
-        #             results.append(future)
-        #
-        #         # Wait for warmup period in each worker.
-        #         logger.info(self.log_msg(f"Await start of inference in parent..."))
-        #         # PROBLEM: exceptions BEFORE barrier won't be seen in parent, since they get raised
-        #         # when calling future.result().
-        #         self.barrier.wait()
-        #         logger.info(self.log_msg(f"Start inference in parent..."))
-        #
-        #         start_t = time.time()
-        #
-        #         # Wait for all the processes to finish writing their json files.
-        #         logger.info(self.log_msg(f"Await end of inference in parent..."))
-        #         for future in futures.as_completed(results):
-        #             # NOTE: this SHOULD raise an exception upon failure...
-        #             js_path = future.result()
-        #             js_paths.append(js_path)
-        #
-        #         end_t = time.time()
-        #         logger.info(self.log_msg(f"Saw end of inference in parent (took {end_t - start_t} sec)"))
-        #
-        #         return start_t, end_t, js_paths
 
         def with_Process():
             if 'tensorflow' in sys.modules.keys():
@@ -1739,101 +2005,15 @@ class MicrobenchInferenceMultiprocess:
         import_tensorflow()
         assert tf is not None
         # import_all()
-        def _run():
-            args = self.args
-            algo = args.algo
-            trained_agent = self.trained_agent
 
-            env = trained_agent.make_env()
-            model = trained_agent.make_model(env)
-            env_id = args.env
+        args = self.args
 
-            is_atari = trained_agent.is_atari()
-
-            obs = env.reset()
-
-            # Force deterministic for DQN, DDPG, SAC and HER (that is a wrapper around)
-            deterministic = args.deterministic or algo in ['dqn', 'ddpg', 'sac', 'her'] and not args.stochastic
-
-            obs_space = env.observation_space
-
-            def is_warmed_up(t):
-                return t > args.warmup_iters
-
-            process_name = get_process_name(args)
-            phase_name = process_name
-            random_obs = random_minibatch(args.batch_size, obs_space)
-            logger.info(self.log_msg("using --batch-size={batch} => {shape}".format(
-                batch=args.batch_size,
-                shape=random_obs.shape,
-            )))
-
-            warmed_up = False
-            inference_time_sec = []
-            for t in range(args.n_timesteps):
-
-                if not warmed_up and is_warmed_up(t):
-                    # Entire training loop is now running; enable IML tracing
-                    start_t = time.time()
-                    start_timesteps = t
-                    if self.barrier is not None:
-                        logger.info(self.log_msg(f"Await inference in thread={task_id}..."))
-                        self.barrier.wait()
-                        logger.info(self.log_msg(f"Start inference in thread={task_id}"))
-                    else:
-                        pass
-                        logger.info(self.log_msg(f"Running inference in single-process mode in thread={task_id}"))
-                    warmed_up = True
-
-                start_inference_t = time.time()
-                action, _ = model.predict(random_obs, deterministic=deterministic)
-                end_inference_t = time.time()
-                if warmed_up:
-                    inf_time_sec = end_inference_t - start_inference_t
-                    inference_time_sec.append(inf_time_sec)
-
-            end_t = time.time()
-
-            if self.num_tasks == 1:
-                self.single_process_start_t = start_t
-                self.single_process_end_t = end_t
-
-            inference_time_sec = np.array(inference_time_sec)
-            # total_time_sec = (end_t - start_t)
-            total_time_sec = np.sum(inference_time_sec)
-            # total_samples = (args.n_timesteps - start_timesteps)*args.batch_size
-            total_samples = len(inference_time_sec)*args.batch_size
-            throughput_qps = total_samples / total_time_sec
-            inference_js = dict()
-            inference_js['raw_samples'] = dict()
-            inference_js['summary_metrics'] = dict()
-            inference_js['raw_samples']['inference_time_sec'] = inference_time_sec.tolist()
-            inference_js['summary_metrics']['throughput_qps'] = throughput_qps
-            inference_js['summary_metrics']['total_samples'] = total_samples
-            inference_js['summary_metrics']['batch_size'] = args.batch_size
-            inference_js['summary_metrics']['total_time_sec'] = total_time_sec
-            inference_js['summary_metrics']['mean_inference_time_sec'] = inference_time_sec.mean()
-            inference_js['summary_metrics']['std_inference_time_sec'] = inference_time_sec.std()
-            inference_js['summary_metrics']['inference_time_percentile_99_sec'] = np.percentile(inference_time_sec, 0.99)
-            js_path = _j(args.directory, f"mode_microbench_inference_multiprocess.task_id_{task_id}.json")
-            do_dump_json(inference_js, js_path)
-
-            # Workaround for https://github.com/openai/gym/issues/893
-            if not args.no_render:
-                if args.n_envs == 1 and 'Bullet' not in env_id and not is_atari and isinstance(env, common_vec_env.VecEnv):
-                    # DummyVecEnv
-                    # Unwrap env
-                    while isinstance(env, common_vec_env.VecNormalize) or isinstance(env, common_vec_env.VecFrameStack):
-                        env = env.venv
-                    env.envs[0].env.close()
-                else:
-                    # SubprocVecEnv
-                    env.close()
-
-            return js_path
-
-        logger.info(f"Start worker task_id={task_id}")
-        do_with_device(self.args, _run)
+        if args.graph_def_pb is not None:
+            InferenceWorkerKlass = GraphDefInferenceWorker
+        else:
+            InferenceWorkerKlass = StableBaselinesInferenceWorker
+        inference_worker = InferenceWorkerKlass(expr=self, task_id=task_id)
+        inference_worker.run()
 
     @property
     def num_tasks(self):
@@ -1902,6 +2082,63 @@ def do_with_device(args, func):
     with tf.device(device_name):
         func()
 
+
+def load_saved_model(sess, saved_model_dir):
+    # return tf.saved_model.load(sess, ["master"], saved_model_dir)
+    return tf.saved_model.load(saved_model_dir, ["master"])
+    # with tf.io.gfile.GFile(frozen_graph_filename, "rb") as f:
+    #     graph_def = tf.compat.v1.GraphDef()
+    #     graph_def.ParseFromString(f.read())
+    # with tf.Graph().as_default() as graph:
+    #     tf.import_graph_def(graph_def)
+    # return graph
+
+
+def load_graph(frozen_graph_filename):
+    with tf.io.gfile.GFile(frozen_graph_filename, "rb") as f:
+        graph_def = tf.compat.v1.GraphDef()
+        graph_def.ParseFromString(f.read())
+    with tf.Graph().as_default() as graph:
+        tf.import_graph_def(graph_def)
+    return graph
+
+def save_tensorflow_graph(sess, graph, output_names, model_path):
+    from tensorflow.core.framework.graph_pb2 import GraphDef
+    if type(graph) == GraphDef:
+        graph_def = graph
+    else:
+        assert type(graph) == tf.Graph
+        graph_def = graph.as_graph_def()
+    frozen_graph = tf.compat.v1.graph_util.convert_variables_to_constants(
+        sess, graph_def,
+        output_names,
+    )
+    frozen_graph = tf.compat.v1.graph_util.remove_training_nodes(frozen_graph)
+
+    logger.info("Write TensorFlow inference graph to {path}".format(
+        path=model_path))
+    with open(model_path, "wb") as f:
+        f.write(frozen_graph.SerializeToString())
+
+def operation_shape(tf_op, skip_batch_dim=True):
+    shape = [dim.size for dim in tf_op.node_def.attr['shape'].shape.dim]
+    if shape[0] == -1 and skip_batch_dim:
+        shape = shape[1:]
+    return shape
+
+def analyze_inputs_outputs(graph):
+    ops = graph.get_operations()
+    outputs_set = set(ops)
+    inputs = []
+    for op in ops:
+        if len(op.inputs) == 0 and op.type != 'Const':
+            inputs.append(op)
+        else:
+            for input_tensor in op.inputs:
+                if input_tensor.op in outputs_set:
+                    outputs_set.remove(input_tensor.op)
+    outputs = list(outputs_set)
+    return (inputs, outputs)
 
 if __name__ == '__main__':
     main()
