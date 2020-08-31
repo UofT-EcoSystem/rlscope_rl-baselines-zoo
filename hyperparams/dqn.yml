@@ -3,8 +3,10 @@ atari:
   n_timesteps: !!float 1e7
   buffer_size: 10000
   learning_rate: !!float 1e-4
-  learning_starts: 10000
-  target_network_update_freq: 1000
+  # learning_starts: 10000
+  learning_starts: 100
+  # target_network_update_freq: 1000
+  target_network_update_freq: 8
   train_freq: 4
   exploration_final_eps: 0.01
   exploration_fraction: 0.1

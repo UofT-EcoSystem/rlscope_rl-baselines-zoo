@@ -35,19 +35,46 @@ from utils.hyperparams_opt import hyperparam_optimization
 
 import iml_profiler.api as iml
 
+# Use to find root directory of rl-baselines-zoo repo, and to find hyperparams/*.yml files.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 def get_paths(args, env_id):
-    # Save trained model
-    log_path = "{}/{}/".format(args.log_folder, args.algo)
-    save_path = os.path.join(log_path, "{}_{}".format(env_id, get_latest_run_id(log_path, env_id) + 1))
-    iml_directory = os.path.join(save_path, 'iml_traces')
-    params_path = "{}/{}".format(save_path, env_id)
-    os.makedirs(params_path, exist_ok=True)
+
+    if args.iml_directory is not None:
+        log_folder = os.path.join(args.iml_directory, 'rl_baselines_zoo')
+        iml_directory = os.path.join(args.iml_directory, 'iml')
+    else:
+        assert args.log_folder is not None
+        log_folder = os.path.join(args.log_folder, 'rl_baselines_zoo')
+        iml_directory = os.path.join(args.log_folder, 'iml')
+
+    log_path = os.path.join(log_folder, 'logs')
+    save_path = os.path.join(log_folder, 'model')
+    params_path = os.path.join(log_folder, 'hyperparams')
+    for path in [log_path, save_path, params_path]:
+        os.makedirs(path, exist_ok=True)
+
     paths = {
-        'log_path':log_path,
-        'save_path':save_path,
-        'params_path':params_path,
-        'iml_directory':iml_directory,
+        'log_folder': log_folder,
+        'log_path': log_path,
+        'save_path': save_path,
+        'params_path': params_path,
+        'iml_directory': iml_directory,
     }
+
+    # # Save trained model
+    # log_path = "{}/{}/".format(args.log_folder, args.algo)
+    # save_path = os.path.join(log_path, "{}_{}".format(env_id, get_latest_run_id(log_path, env_id) + 1))
+    # iml_directory = os.path.join(save_path, 'iml_traces')
+    # params_path = "{}/{}".format(save_path, env_id)
+    # os.makedirs(params_path, exist_ok=True)
+    # paths = {
+    #     'log_path':log_path,
+    #     'save_path':save_path,
+    #     'params_path':params_path,
+    #     'iml_directory':iml_directory,
+    # }
+
     return paths
 
 def get_mpi_rank():
@@ -174,7 +201,7 @@ if __name__ == '__main__':
             print("=" * 10, env_id, "=" * 10)
 
             # Load hyperparameters from yaml file
-            with open('hyperparams/{}.yml'.format(args.algo), 'r') as f:
+            with open(os.path.join(SCRIPT_DIR, 'hyperparams/{}.yml'.format(args.algo)), 'r') as f:
                 hyperparams_dict = yaml.load(f)
                 if env_id in list(hyperparams_dict.keys()):
                     hyperparams = hyperparams_dict[env_id]

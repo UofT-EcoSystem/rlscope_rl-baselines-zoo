@@ -74,7 +74,7 @@ parking-v0:
 #   policy_kwargs: "dict(layers=[16, 16, 16])"
 
 FetchPush-v1:
-  env_wrapper: utils.wrappers.DoneOnSuccessWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.DoneOnSuccessWrapper
   n_timesteps: !!float 3e6
   policy: 'MlpPolicy'
   model_class: 'sac'

@@ -138,7 +138,7 @@ Walker2DBulletEnv-v0:
   cliprange: 0.2
 
 HalfCheetahBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   normalize: true
   n_envs: 1
   n_timesteps: !!float 2e6

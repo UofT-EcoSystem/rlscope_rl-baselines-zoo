@@ -47,7 +47,7 @@ BipedalWalkerHardcore-v2:
 
 # Tuned
 HalfCheetahBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'CustomSACPolicy'
   learning_rate: !!float 3e-4
@@ -73,7 +73,7 @@ HalfCheetah-v2:
 
 # Tuned
 AntBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'CustomSACPolicy'
   learning_rate: !!float 3e-4
@@ -87,7 +87,7 @@ AntBulletEnv-v0:
   learning_starts: 10000
 
 HopperBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'CustomSACPolicy'
   learning_rate: lin_3e-4
@@ -99,7 +99,7 @@ HopperBulletEnv-v0:
   learning_starts: 1000
 
 Walker2DBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'CustomSACPolicy'
   learning_rate: lin_3e-4
