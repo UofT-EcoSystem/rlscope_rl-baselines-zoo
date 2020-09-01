@@ -32,52 +32,12 @@ from stable_baselines.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines.her import HERGoalEnvWrapper
 from stable_baselines.common.base_class import _UnvecWrapper
 
-from stable_baselines.iml import wrap_pybullet, unwrap_pybullet
-
 from utils import make_env, ALGOS, linear_schedule, get_latest_run_id, get_wrapper_class
-from utils.hyperparams_opt import hyperparam_optimization
+# from utils.hyperparams_opt import hyperparam_optimization
 from utils.callbacks import SaveVecNormalizeCallback
 from utils.noise import LinearNormalActionNoise
 from utils.utils import StoreDict
 
-
-import iml_profiler.api as iml
-
-def get_paths(args, env_id):
-    # Save trained model
-    log_path = "{}/{}/".format(args.log_folder, args.algo)
-    save_path = os.path.join(log_path, "{}_{}".format(env_id, get_latest_run_id(log_path, env_id) + 1))
-    iml_directory = os.path.join(save_path, 'iml_traces')
-    params_path = "{}/{}".format(save_path, env_id)
-    os.makedirs(params_path, exist_ok=True)
-    paths = {
-        'log_path':log_path,
-        'save_path':save_path,
-        'params_path':params_path,
-        'iml_directory':iml_directory,
-    }
-    return paths
-
-def get_mpi_rank():
-    rank = 0
-    using_mpi = False
-    if MPI.COMM_WORLD.Get_size() > 1:
-        using_mpi = True
-        rank = MPI.COMM_WORLD.Get_rank()
-    return rank, using_mpi
-
-def get_process_name(args):
-    rank, using_mpi = get_mpi_rank()
-    if using_mpi:
-        process_name = "{algo}_{env}_{proc}".format(
-            algo=args.algo,
-            env=env_ids[0],
-            proc=rank)
-    else:
-        process_name = "{algo}_{env}".format(
-            algo=args.algo,
-            env=env_ids[0])
-    return process_name
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -100,8 +60,8 @@ if __name__ == '__main__':
     parser.add_argument('-f', '--log-folder', help='Log folder', type=str, default='logs')
     parser.add_argument('--seed', help='Random generator seed', type=int, default=0)
     parser.add_argument('--n-trials', help='Number of trials for optimizing hyperparameters', type=int, default=10)
-    parser.add_argument('-optimize', '--optimize-hyperparameters', action='store_true', default=False,
-                        help='Run hyperparameters search')
+    # parser.add_argument('-optimize', '--optimize-hyperparameters', action='store_true', default=False,
+    #                     help='Run hyperparameters search')
     parser.add_argument('--n-jobs', help='Number of parallel jobs when optimizing hyperparameters', type=int, default=1)
     parser.add_argument('--sampler', help='Sampler to use when optimizing hyperparameters', type=str,
                         default='tpe', choices=['random', 'tpe', 'skopt'])
@@ -117,48 +77,12 @@ if __name__ == '__main__':
                         help='Ensure that the run has a unique ID')
     parser.add_argument('--env-kwargs', type=str, nargs='+', action=StoreDict,
                         help='Optional keyword argument to pass to the env constructor')
-    iml.add_iml_arguments(parser)
     args = parser.parse_args()
-    iml.register_wrap_module(wrap_pybullet, unwrap_pybullet)
 
     # Going through custom gym packages to let them register in the global registory
     for env_module in args.gym_packages:
         importlib.import_module(env_module)
 
-    env_ids = args.env
-
-    if len(env_ids) != 1:
-        print("IML: ERROR; only one --env allowed at a time.")
-    # Default output paths from training are:
-    #
-    # trained_agents (--log-folder)
-    # └── ppo2 (--algo)
-    #     └── CartPole-v1_1 (--env + new largest unique exp_id)
-    #         ├── CartPole-v1 (--env)
-    #         │   └── config.yml
-    #         └── CartPole-v1.pkl
-    #
-    # We store iml trace files within the output directory hierarchy:
-    #
-    # trained_agents
-    # └── ppo2
-    #     └── CartPole-v1_1
-    #         ├── CartPole-v1
-    #         │   └── config.yml
-    #         ├── iml_traces
-    #         │   └── ... (iml trace files)
-    #         └── CartPole-v1.pkl
-    paths = get_paths(args, env_ids[0])
-    iml_directory = paths['iml_directory']
-    iml.handle_iml_args(parser, args,
-                        directory=iml_directory,
-                        reports_progress=True)
-
-    process_name = get_process_name(args)
-    phase_name = process_name
-
-    # with iml.prof.profile(process_name=process_name, phase_name=phase_name):
-    #     with iml.prof.operation('setup_training'):
     env_id = args.env
     registered_envs = set(gym.envs.registry.env_specs.keys())
 
@@ -176,8 +100,7 @@ if __name__ == '__main__':
         # Seed but with a random one
         args.seed = np.random.randint(2**32 - 1)
 
-                if args.verbose > 0:
-                    pprint(saved_hyperparams)
+    set_global_seeds(args.seed)
 
     if args.trained_agent != "":
         valid_extension = args.trained_agent.endswith('.pkl') or args.trained_agent.endswith('.zip')
@@ -288,16 +211,9 @@ if __name__ == '__main__':
     if 'env_wrapper' in hyperparams.keys():
         del hyperparams['env_wrapper']
 
-    # log_path = "{}/{}/".format(args.log_folder, args.algo)
-    # save_path = os.path.join(log_path, "{}_{}{}".format(env_id, get_latest_run_id(log_path, env_id) + 1, uuid_str))
-    # params_path = "{}/{}".format(save_path, env_id)
-    # os.makedirs(params_path, exist_ok=True)
-
-    # Save trained model
-    paths = get_paths(args, env_id)
-    log_path = paths['log_path']
-    save_path = paths['save_path']
-    params_path = paths['params_path']
+    log_path = "{}/{}/".format(args.log_folder, args.algo)
+    save_path = os.path.join(log_path, "{}_{}{}".format(env_id, get_latest_run_id(log_path, env_id) + 1, uuid_str))
+    params_path = "{}/{}".format(save_path, env_id)
     os.makedirs(params_path, exist_ok=True)
 
     callbacks = []
@@ -378,7 +294,8 @@ if __name__ == '__main__':
     env = create_env(n_envs)
     # Create test env if needed, do not normalize reward
     eval_env = None
-    if args.eval_freq > 0 and not args.optimize_hyperparameters:
+    if args.eval_freq > 0:
+        # if args.eval_freq > 0 and not args.optimize_hyperparameters:
         # Account for the number of parallel environments
         args.eval_freq = max(args.eval_freq // n_envs, 1)
 
@@ -397,8 +314,8 @@ if __name__ == '__main__':
         del hyperparams['frame_stack']
 
     # Stop env processes to free memory
-    if args.optimize_hyperparameters and n_envs > 1:
-        env.close()
+    # if args.optimize_hyperparameters and n_envs > 1:
+    #     env.close()
 
     # Parse noise string for DDPG and SAC
     if algo_ in ['ddpg', 'sac', 'td3'] and hyperparams.get('noise_type') is not None:
@@ -451,35 +368,35 @@ if __name__ == '__main__':
                 # Legacy:
                 env.load_running_average(exp_folder)
 
-    elif args.optimize_hyperparameters:
-
-        if args.verbose > 0:
-            print("Optimizing hyperparameters")
-
-        def create_model(*_args, **kwargs):
-            """
-            Helper to create a model with different hyperparameters
-            """
-            return ALGOS[args.algo](env=create_env(n_envs, no_log=True), tensorboard_log=tensorboard_log,
-                                    verbose=0, **kwargs)
-
-        data_frame = hyperparam_optimization(args.algo, create_model, create_env, n_trials=args.n_trials,
-                                             n_timesteps=n_timesteps, hyperparams=hyperparams,
-                                             n_jobs=args.n_jobs, seed=args.seed,
-                                             sampler_method=args.sampler, pruner_method=args.pruner,
-                                             verbose=args.verbose)
-
-        report_name = "report_{}_{}-trials-{}-{}-{}_{}.csv".format(env_id, args.n_trials, n_timesteps,
-                                                                args.sampler, args.pruner, int(time.time()))
-
-        log_path = os.path.join(args.log_folder, args.algo, report_name)
-
-        if args.verbose:
-            print("Writing report to {}".format(log_path))
-
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        data_frame.to_csv(log_path)
-        exit()
+    # elif args.optimize_hyperparameters:
+    #
+    #     if args.verbose > 0:
+    #         print("Optimizing hyperparameters")
+    #
+    #     def create_model(*_args, **kwargs):
+    #         """
+    #         Helper to create a model with different hyperparameters
+    #         """
+    #         return ALGOS[args.algo](env=create_env(n_envs, no_log=True), tensorboard_log=tensorboard_log,
+    #                                 verbose=0, **kwargs)
+    #
+    #     data_frame = hyperparam_optimization(args.algo, create_model, create_env, n_trials=args.n_trials,
+    #                                          n_timesteps=n_timesteps, hyperparams=hyperparams,
+    #                                          n_jobs=args.n_jobs, seed=args.seed,
+    #                                          sampler_method=args.sampler, pruner_method=args.pruner,
+    #                                          verbose=args.verbose)
+    #
+    #     report_name = "report_{}_{}-trials-{}-{}-{}_{}.csv".format(env_id, args.n_trials, n_timesteps,
+    #                                                             args.sampler, args.pruner, int(time.time()))
+    #
+    #     log_path = os.path.join(args.log_folder, args.algo, report_name)
+    #
+    #     if args.verbose:
+    #         print("Writing report to {}".format(log_path))
+    #
+    #     os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    #     data_frame.to_csv(log_path)
+    #     exit()
     else:
         # Train an agent from scratch
         model = ALGOS[args.algo](env=env, tensorboard_log=tensorboard_log, verbose=args.verbose, **hyperparams)
@@ -490,19 +407,6 @@ if __name__ == '__main__':
 
     if len(callbacks) > 0:
         kwargs['callback'] = callbacks
-
-    # IML: only support running with 1 environment at time.
-    assert len(args.env) == 1
-    iml.prof.set_metadata({
-        'algo': args.algo,
-        'env': args.env[0],
-    })
-
-    # Save trained model
-    paths = get_paths(args, env_id)
-    log_path = paths['log_path']
-    save_path = paths['save_path']
-    params_path = paths['params_path']
 
     # Save hyperparams
     with open(os.path.join(params_path, 'config.yml'), 'w') as f:
