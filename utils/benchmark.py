@@ -45,9 +45,20 @@ for idx, trained_model in enumerate(trained_models.keys()):
     algo, env_id = trained_models[trained_model]
     n_envs = args.n_envs
     n_timesteps = args.n_timesteps
-    if algo in ['dqn', 'ddpg', 'sac']:
+    if algo in ['dqn', 'ddpg', 'sac', 'td3']:
         n_envs = 1
         n_timesteps *= args.n_envs
+
+    # Comment out to becnhmark HER robotics env
+    # this requires a mujoco licence
+    if 'Fetch' in env_id:
+        print("Skipping mujoco env: {}".format(env_id))
+        continue
+
+    # Skip old BipedalWalker version
+    if 'Walker-v2' in env_id or 'WalkerHardcore-v2' in env_id:
+        continue
+
     reward_log = '{}/{}/'.format(args.benchmark_dir, trained_model)
     arguments = [
         '-n', str(n_timesteps),
@@ -110,6 +121,11 @@ with open("{}/benchmark.md".format(args.benchmark_dir), "w") as f:
     writer.stream = f
     writer.write_table()
 print("Results written to:", "{}/benchmark.md".format(args.benchmark_dir))
+
+# Update root benchmark file
+with open("benchmark.md", "w") as f:
+    writer.stream = f
+    writer.write_table()
 
 # Alternatively, to dump as csv file:
 # results_df.to_csv('{}/benchmark.csv'.format(args.benchmark_dir), sep=",", index=False)

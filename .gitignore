@@ -1,8 +1,12 @@
 __pycache__/
 logs/
+logs
 .pytest_cache/
 .coverage
 .coverage.*
 .idea/
 cluster_sbatch.sh
 cluster_sbatch_mpi.sh
+trained_agents/
+.git/
+.pytype/
