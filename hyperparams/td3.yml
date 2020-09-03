@@ -20,7 +20,7 @@ LunarLanderContinuous-v2:
   noise_std: 0.1
 
 HalfCheetah-v2:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 1e6
   policy: 'MlpPolicy'
   gamma: 0.99
@@ -35,7 +35,7 @@ HalfCheetah-v2:
   policy_kwargs: "dict(layers=[400, 300])"
 
 HalfCheetahBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'MlpPolicy'
   gamma: 0.99
@@ -79,7 +79,7 @@ BipedalWalkerHardcore-v3:
   policy_kwargs: "dict(layers=[400, 300])"
 
 AntBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'MlpPolicy'
   gamma: 0.99
@@ -94,7 +94,7 @@ AntBulletEnv-v0:
   policy_kwargs: "dict(layers=[400, 300])"
 
 HopperBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'MlpPolicy'
   gamma: 0.99
@@ -109,7 +109,7 @@ HopperBulletEnv-v0:
   policy_kwargs: "dict(layers=[400, 300])"
 
 Walker2DBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'MlpPolicy'
   gamma: 0.99
@@ -125,7 +125,7 @@ Walker2DBulletEnv-v0:
   policy_kwargs: "dict(layers=[400, 300])"
 
 HumanoidBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e7
   policy: 'MlpPolicy'
   gamma: 0.99
@@ -140,7 +140,7 @@ HumanoidBulletEnv-v0:
   policy_kwargs: "dict(layers=[400, 300])"
 
 ReacherBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 1e6
   policy: 'MlpPolicy'
   gamma: 0.99
@@ -169,7 +169,7 @@ InvertedDoublePendulumBulletEnv-v0:
   policy_kwargs: "dict(layers=[400, 300])"
 
 InvertedPendulumSwingupBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 1e6
   policy: 'MlpPolicy'
   gamma: 0.99
@@ -184,7 +184,7 @@ InvertedPendulumSwingupBulletEnv-v0:
   policy_kwargs: "dict(layers=[400, 300])"
 
 MinitaurBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 1e6
   policy: 'MlpPolicy'
   gamma: 0.99

@@ -86,7 +86,7 @@ LunarLanderContinuous-v2:
 
 # Tuned
 HalfCheetahBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'MlpPolicy'
   timesteps_per_batch: 2048
@@ -101,7 +101,7 @@ HalfCheetahBulletEnv-v0:
 
 # Tuned
 AntBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'MlpPolicy'
   timesteps_per_batch: 2048
@@ -116,7 +116,7 @@ AntBulletEnv-v0:
 
 # Tuned
 Walker2DBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'MlpPolicy'
   timesteps_per_batch: 2048
@@ -131,7 +131,7 @@ Walker2DBulletEnv-v0:
 
 # Tuned
 HopperBulletEnv-v0:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 2e6
   policy: 'MlpPolicy'
   timesteps_per_batch: 2048
@@ -146,7 +146,7 @@ HopperBulletEnv-v0:
 
 # Tuned
 BipedalWalker-v3:
-  env_wrapper: utils.wrappers.TimeFeatureWrapper
+  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   n_timesteps: !!float 5e6
   policy: 'MlpPolicy'
   timesteps_per_batch: 2048
