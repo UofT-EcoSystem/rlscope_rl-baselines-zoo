@@ -57,6 +57,9 @@ Walker2DBulletEnv-v0:
   batch_size: 128
   normalize_observations: True
   normalize_returns: True
+  # RLS: To match TD3 hyperparameter for "consecutive steps before gradient update", set nb_rollout_steps = 1000
+  # (Same as TD3.train_freq)
+  # nb_rollout_steps: 1000
 
 # To be tuned
 AntBulletEnv-v0:
