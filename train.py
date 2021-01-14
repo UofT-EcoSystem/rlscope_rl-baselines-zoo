@@ -41,20 +41,20 @@ from utils.callbacks import SaveVecNormalizeCallback
 from utils.noise import LinearNormalActionNoise
 from utils.utils import StoreDict
 
-import iml_profiler.api as iml
+import rlscope.api as rlscope
 from stable_baselines import rlscope_common
 
 # Use to find root directory of rl-baselines-zoo repo, and to find hyperparams/*.yml files.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_paths(args, env_id):
-    if args.iml_directory is not None:
-        log_folder = os.path.join(args.iml_directory, 'rl_baselines_zoo')
-        iml_directory = os.path.join(args.iml_directory, 'iml')
+    if args.rlscope_directory is not None:
+        log_folder = os.path.join(args.rlscope_directory, 'rl_baselines_zoo')
+        rlscope_directory = os.path.join(args.rlscope_directory, 'rlscope')
     else:
         assert args.log_folder is not None
         log_folder = os.path.join(args.log_folder, 'rl_baselines_zoo')
-        iml_directory = os.path.join(args.log_folder, 'iml')
+        rlscope_directory = os.path.join(args.log_folder, 'rlscope')
 
     log_path = os.path.join(log_folder, 'logs')
     save_path = os.path.join(log_folder, 'model')
@@ -67,7 +67,7 @@ def get_paths(args, env_id):
         'log_path': log_path,
         'save_path': save_path,
         'params_path': params_path,
-        'iml_directory': iml_directory,
+        'rlscope_directory': rlscope_directory,
     }
     return paths
 
@@ -110,7 +110,7 @@ if __name__ == '__main__':
                         help='Ensure that the run has a unique ID')
     parser.add_argument('--env-kwargs', type=str, nargs='+', action=StoreDict,
                         help='Optional keyword argument to pass to the env constructor')
-    iml.add_iml_arguments(parser)
+    rlscope.add_rlscope_arguments(parser)
     args = parser.parse_args()
 
     paths = get_paths(args, args.env)
@@ -118,8 +118,8 @@ if __name__ == '__main__':
     save_path = paths['save_path']
     params_path = paths['params_path']
 
-    iml.handle_iml_args(parser, args, directory=paths['iml_directory'], reports_progress=True)
-    iml.prof.set_metadata({
+    rlscope.handle_rlscope_args(parser, args, directory=paths['rlscope_directory'], reports_progress=True)
+    rlscope.prof.set_metadata({
         'algo': args.algo,
         'env': args.env,
     })
@@ -462,7 +462,7 @@ if __name__ == '__main__':
     print("Log path: {}".format(save_path))
 
     try:
-        with iml.prof.profile(process_name=process_name, phase_name=phase_name):
+        with rlscope.prof.profile(process_name=process_name, phase_name=phase_name):
             model.learn(n_timesteps, **kwargs)
     except KeyboardInterrupt:
         pass
