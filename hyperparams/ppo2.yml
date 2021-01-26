@@ -151,22 +151,37 @@ LunarLanderContinuous-v2:
   noptepochs: 4
   ent_coef: 0.01
 
+# RLSCOPE: Old hyperparameters used in RL-Scope paper.
 Walker2DBulletEnv-v0:
-  env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
   normalize: true
-  n_envs: 4
+  n_envs: 8
   n_timesteps: !!float 2e6
   policy: 'MlpPolicy'
-  n_steps: 1024
-  nminibatches: 64
+  n_steps: 2048
+  nminibatches: 32
   lam: 0.95
   gamma: 0.99
   noptepochs: 10
   ent_coef: 0.0
-  learning_rate: lin_2.5e-4
-  cliprange: 0.1
-  cliprange_vf: -1
+  learning_rate: 2.5e-4
+  cliprange: 0.2
 
+# RLSCOPE: New hyperparameters (not used in RL-Scope paper)
+# Walker2DBulletEnv-v0:
+#   env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
+#   normalize: true
+#   n_envs: 4
+#   n_timesteps: !!float 2e6
+#   policy: 'MlpPolicy'
+#   n_steps: 1024
+#   nminibatches: 64
+#   lam: 0.95
+#   gamma: 0.99
+#   noptepochs: 10
+#   ent_coef: 0.0
+#   learning_rate: lin_2.5e-4
+#   cliprange: 0.1
+#   cliprange_vf: -1
 
 HalfCheetahBulletEnv-v0:
   env_wrapper: stable_baselines.rl_baselines_zoo.utils.wrappers.TimeFeatureWrapper
