@@ -118,7 +118,7 @@ if __name__ == '__main__':
     save_path = paths['save_path']
     params_path = paths['params_path']
 
-    rlscope.handle_rlscope_args(parser, args, directory=paths['rlscope_directory'], reports_progress=True)
+    rlscope.handle_rlscope_args(parser, args, directory=paths['rlscope_directory'], reports_progress=True, delay=True)
     rlscope.prof.set_metadata({
         'algo': args.algo,
         'env': args.env,
